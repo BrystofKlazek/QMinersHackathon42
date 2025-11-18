@@ -3,12 +3,7 @@ import pandas as pd
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-STAT_NAMES: List[str] = [
-    "PEN", "MAJ", "PPG", "SHG", "SV", "PIM", "SOG",
-    "BLK_S", "HIT", "BLK", "FO",
-    "P1", "P2", "P3",
-    "OT", "SO",
-]
+
 
 @dataclass
 class Preprocessor:
@@ -26,17 +21,18 @@ class Preprocessor:
       all H_* / A_* stat columns from STAT_NAMES (PEN, SOG, P1, P2, ...)
       diff_* versions of those stats (tried to add diferences)
       H/D/A outcome columns via one hot encoding
-        
-    Tried to include typing, because that is sometimes the standard and I wanted
-    to learn to use it.
 
     """
+
+    # use default_factory to avoid dataclass mutable-default issue
     stat_names: List[str] = field(default_factory=lambda: STAT_NAMES.copy())
 
+    # numeric input columns (for X_num)
     numeric_cols_: List[str] = field(default_factory=list)
     means_: Dict[str, float] = field(default_factory=dict)
     stds_: Dict[str, float] = field(default_factory=dict)
 
+    # stat target columns (for y_stats)
     stat_target_cols_: List[str] = field(default_factory=list)
     stat_means_: Dict[str, float] = field(default_factory=dict)
     stat_stds_: Dict[str, float] = field(default_factory=dict)
@@ -45,21 +41,37 @@ class Preprocessor:
     use_unknown_team_: bool = False
     unk_team_id_: Optional[int] = None
 
+    # ---------- internals for diff_* ----------
+
+    def _ensure_diff_cols(self, df: pd.DataFrame) -> pd.DataFrame:
+        # This adds diff_X = H_X - A_X columns in-place and returns the df
+        # We only use these as auxiliary targets (not inputs).
+        for stat in self.stat_names:
+            h_col = f"H_{stat}"
+            a_col = f"A_{stat}"
+            diff_col = f"diff_{stat}"
+            if diff_col not in df.columns:
+                df[diff_col] = df[h_col] - df[a_col]
+        return df
+
+    # ---------- core API ----------
 
     def fit(self, df: pd.DataFrame) -> "Preprocessor":
         """
         Fit numeric scaling for INPUT features and stat targets, and
         infer team ID range, on a training dataframe.
 
-        The fit is called on finished Games data, so all post-match
+        IMPORTANT: fit is called on finished Games data, so all post-match
         stats/labels are present here.
         """
         df = df.copy()
+        df = self._ensure_diff_cols(df)
 
+        # 1) INPUT NUMERIC FEATURES (leak-free)
+        #    Season + ELO + simple form features.
         num_cols: List[str] = ["Season"]
 
-        #HERE I ADD HISTORY AND ELO TO THE TRAINING DATASET
-
+        # Optional extra numeric features, only if they exist in df
         extra_cols = [
             "ELO_H", "ELO_A", "ELO_diff",
             "H_gp_before", "H_gf_mean_before", "H_ga_mean_before",
@@ -73,8 +85,6 @@ class Preprocessor:
 
         self.numeric_cols_ = num_cols
 
-        #AND HERE THEY GET NORMALISED
-
         for col in self.numeric_cols_:
             col_values = df[col].astype(float)
             mean = float(col_values.mean())
@@ -84,24 +94,36 @@ class Preprocessor:
             self.means_[col] = mean
             self.stds_[col] = std
         
-        # HERE ARE FUTURE STATS, NOT YET USED - MAYBE TRAIN IT FURTHER WITH SOME 
-        # DIVERGENCE USING THESE OR SMTH?
+        # 2) STAT TARGETS (auxiliary labels, normalized)
+        #    We include:
+        #      - HS, AS (goals)
+        #      - Special (OT/SO etc. as numeric target)
+        #      - H_stat, A_stat, diff_stat for each stat_name
         stat_target_cols: List[str] = []
 
+        # goals:
         for col in ["HS", "AS"]:
             if col not in df.columns:
                 raise KeyError(f"Stat target column '{col}' not found in training df.")
             stat_target_cols.append(col)
 
+        # Special as another stat target (NOT input)
         if "Special" in df.columns:
             stat_target_cols.append("Special")
         else:
             raise KeyError("Stat target column 'Special' not found in training df.")
 
+        # stats and their diffs:
         for stat in self.stat_names:
             for prefix in ("H", "A"):
                 col = f"{prefix}_{stat}"
+                if col not in df.columns:
+                    raise KeyError(f"Stat target column '{col}' not found in training df.")
                 stat_target_cols.append(col)
+            diff_col = f"diff_{stat}"
+            if diff_col not in df.columns:
+                raise KeyError(f"Stat target column '{diff_col}' not found in training df.")
+            stat_target_cols.append(diff_col)
 
         self.stat_target_cols_ = stat_target_cols
 
@@ -114,7 +136,7 @@ class Preprocessor:
             self.stat_means_[col] = mean
             self.stat_stds_[col] = std
 
-        # AND HREE TEAM ID RANGE (for embeddings)
+        # 3) TEAM ID RANGE (for embeddings)
         hid_max = int(df["HID"].astype(int).max())
         aid_max = int(df["AID"].astype(int).max())
         self.max_team_id_ = max(hid_max, aid_max)
@@ -132,14 +154,27 @@ class Preprocessor:
     ) -> Dict[str, np.ndarray]:
         """
         This now applies the fitted preprocessing to any future dataframe.
+
+        Concretely it returns a dict with:
+          - 'X_num': the standardized numeric matrix [N, num_features]
+                -> this contains the leak-free numerics we need for the model
+          - 'home_ids': [N]
+          - 'away_ids': [N]
+          - 'q_book': bookmaker probabilities [N, 3]
+          - 'y': labels [N] (0/1/2), only if with_labels=True
+                -> THIS CANNOT BE USED ON FUTURE GAMES.
+          - 'y_stats': normalized auxiliary stat targets [N, S],
+                       only if with_stat_targets=True and only for finished games.
+
         IMPORTANT:
-            For training on Games: with_labels=True, with_stat_targets=True
-            For opps/future games: with_labels=False, with_stat_targets=False
+          - For training on Games: with_labels=True, with_stat_targets=True
+          - For opps/future games: with_labels=False, with_stat_targets=False
         """
         if not self.numeric_cols_:
             raise RuntimeError("preprocessor not fitted, please call fit() first")
 
         df = df.copy()
+        df = self._ensure_diff_cols(df)
 
         X_num = self._standardize_numeric(df)
         home_ids, away_ids = self._map_team_ids(df)
@@ -160,10 +195,11 @@ class Preprocessor:
 
         return result
 
+    # ---------- helpers for numeric inputs ----------
 
     def _standardize_numeric(self, df: pd.DataFrame) -> np.ndarray:
         # Here we take the numeric input data and turn it directly into np from
-        # pd.DataFrame 
+        # pd.DataFrame. This is Season only (for now).
         X_num_list = []
         for col in self.numeric_cols_:
             x = df[col].astype(float).values
@@ -175,22 +211,27 @@ class Preprocessor:
 
     def _map_team_ids(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Map HID/AID to int arrays in a safe range [0, max_team_id_].
+        Map HID/AID to int64 arrays in a safe range [0, max_team_id_].
         Any team id above max_team_id_ is clipped to max_team_id_ so we
-        never index outside the embedding. This is so if an unknown team joins,
-        the model doesnt error out.
+        never index outside the embedding.
         """
         home_ids = df["HID"].astype(int).values
         away_ids = df["AID"].astype(int).values
 
+        # clip to [0, max_team_id_]
         home_ids = np.clip(home_ids, 0, self.max_team_id_)
         away_ids = np.clip(away_ids, 0, self.max_team_id_)
 
         return home_ids.astype(np.int64), away_ids.astype(np.int64)
+    # ---------- helpers for stat targets (auxiliary labels) ----------
 
     def _extract_normalized_stat_targets(self, df: pd.DataFrame) -> np.ndarray:
         """
         Build a matrix of normalized auxiliary stat labels from post-match columns.
+
+        For each col in stat_target_cols_:
+          y_norm = (y - mean) / std
+
         These are used ONLY during training (finished games), never as inputs,
         and they are NOT required at prediction time.
         """
@@ -199,6 +240,8 @@ class Preprocessor:
 
         cols = []
         for col in self.stat_target_cols_:
+            if col not in df.columns:
+                raise KeyError(f"Stat target column '{col}' not found in df.")
             x = df[col].astype(float).values
             mean = self.stat_means_.get(col, 0.0)
             std = self.stat_stds_.get(col, 1.0)
@@ -206,6 +249,7 @@ class Preprocessor:
         Y_stats = np.stack(cols, axis=1).astype(np.float32)
         return Y_stats
 
+    # ---------- labels & bookmaker probs ----------
 
     @staticmethod
     def extract_labels(df: pd.DataFrame) -> np.ndarray:
@@ -215,6 +259,7 @@ class Preprocessor:
         D = df["D"].astype(int).values
         A = df["A"].astype(int).values
 
+        # y = 0 (home), 1 (draw), 2 (away)
         y = np.full_like(H, fill_value=-1, dtype=np.int64)
         y = np.where(H == 1, 0, y)
         y = np.where(D == 1, 1, y)
@@ -255,4 +300,30 @@ class Preprocessor:
 
         Q = np.stack([qH, qD, qA], axis=1).astype(np.float32)
         return Q
+
+
+# Example usage
+#--------------------THESE LONG LINES LOOK NICE--------------------
+if __name__ == "__main__":
+    csv_path = "data/cleaned_games.csv"
+
+    df_all = pd.read_csv(csv_path)
+
+    # Lets say we train on all seasons <= 2010, and keep > 2010 for validation
+    train_mask = df_all["Season"] <= 2010
+    df_train = df_all[train_mask].reset_index(drop=True)
+    df_val = df_all[~train_mask].reset_index(drop=True)
+
+    prep = Preprocessor()
+    prep.fit(df_train)
+
+    # Training: we have finished games, so we can use labels + stat targets
+    train_data = prep.transform(df_train, with_labels=True, with_stat_targets=True)
+
+    # Validation “as opps”: no labels, no stat targets (mimic real betting)
+    val_data = prep.transform(df_val, with_labels=False, with_stat_targets=False)
+
+    print("Train numeric shape:", train_data["X_num"].shape)
+    print("Train y_stats shape:", train_data["y_stats"].shape)
+    print("Val numeric shape:", val_data["X_num"].shape)
 
