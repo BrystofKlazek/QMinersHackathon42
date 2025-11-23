@@ -2,80 +2,99 @@ import numpy as np
 from scipy.optimize import minimize
 #maybe do this for known number of games (bet half wealth?)-> actualize wealth
 
-def betting_strategy(bookmaker_odds = np.array , outcome = np.array):
+
+import numpy as np
+from scipy.optimize import minimize
+
+
+def betting_strategy(bookmaker_odds, outcome, sens):
     """
-    Optimize betting strategy to maximize Sharpe ratio given estimated probabilities and bookmaker odds."""
+    Maximize Sharpe ratio given model probabilities and bookmaker odds.
+    """
 
-    
+    # -----------------------------
+    # 1. CLASSIFICATION
+    # -----------------------------
+    def classify_probabilities(outcome, sens):
+        result = {}
+        for i, p in enumerate(outcome):
+            if p > 0.5 + sens:
+                result[i] = ("H", p)
+            elif p < 0.5 - sens:
+                result[i] = ("A", 1 - p)
+            else:
+                result[i] = ("D", 0.0)
+        return result
 
+    classified = classify_probabilities(outcome, sens)
 
-    # Estimated expected returns vector (example)
-    #here I need (p_io_i - 1)
-    exp_ret = outcome*bookmaker_odds - 1 #but I need it to be vector
+    # Extract only usable probabilities (H/A bets)
+    probs = np.array([v[1] for v in classified.values()])
 
-    #variance 
-    #(1-p_i)p_io_i^2
-    #make sure that im always betting only on one team in game
-    var_ret = (1-outcome)*outcome*bookmaker_odds**2 #again I need vector (for every i)
+    # -----------------------------
+    # 2. EXPECTED RETURN & VARIANCE
+    # -----------------------------
+    exp_ret = probs * bookmaker_odds - 1                           # μ_i = p_i * o_i - 1
+    var_ret = probs * (1 - probs) * (bookmaker_odds ** 2)          # σ_i² = p(1-p)o²
 
-    #if I add proper values into these I can multiplicate accordingly instead of r and sigma
-   
-    # Initial guess for bets (uniform distribution or zeros)
-    b0 = np.ones_like(exp_ret) / len(exp_ret)
-
-    # Wealth available for betting
+    # -----------------------------
+    # 3. INITIAL GUESS
+    # -----------------------------
+    b0 = np.zeros_like(exp_ret)  # start with 0 bets
     wealth = 1.0
 
-    # Constraints
+    # -----------------------------
+    # 4. BOUNDS: zero-prob → force no bet
+    # -----------------------------
+    bounds = []
+    for p in probs:
+        if p == 0:
+            bounds.append((0, 0))           # lock bet = 0
+        else:
+            bounds.append((0, wealth))      # normal range
 
-    def sum_bets_constraint(b):
-        return wealth - np.sum(b)
-
-    """def zero_both_complementary_constraint(b, pairs):
-        # pairs: list of tuples with indices of complementary outcomes
-        return np.array([b[i] * b[j] for i, j in pairs])""" # i think this is not needed, for items shall come in pairs
-
-    # Bounds: bets between 0 and wealth (no short-selling)
-    bounds = [(0, wealth) for _ in range(len(exp_ret))]
-
-
-    """# Example complementary pairs (you must define based on your matches)
-    complementary_pairs = [(0, 1), (2, 3), ...]  """
-
-    # Constraint dicts for scipy
+    # -----------------------------
+    # 5. Constraint: sum(bets) ≤ wealth
+    # -----------------------------
     constraints = [
-        {'type': 'ineq', 'fun': sum_bets_constraint},   # sum(bets) <= wealth
+        {'type': 'ineq', 'fun': lambda b: wealth - np.sum(b)}
     ]
 
-    # Add constraints for complementary bets (at most one positive in pair)
-    # Here, instead of product constraints (nonconvex), constrain sum <= wealth per pair
-    for (i, j) in complementary_pairs:
-        constraints.append({
-            'type': 'ineq',
-            'fun': lambda b, i=i, j=j: wealth - (b[i] + b[j])  # sum of pair bets <= wealth
-        })
+    # -----------------------------
+    # 6. Sharpe ratio (negative for minimizer)
+    # -----------------------------
+    def sharpe_negative(b, exp_ret, var_ret):
+        expected_return = b @ exp_ret
+        variance = np.sum((b ** 2) * var_ret)
 
-    # Objective: negative Sharpe ratio (to minimize)
-    def sharpe_negative(b, r, Sigma):
-        expected_return = b.T @ r
-        variance = b.T @ Sigma @ b
         if variance <= 0:
-            return np.inf  # prevent invalid square root
-        sharpe = expected_return / np.sqrt(variance)
-        return -sharpe
+            return np.inf
 
-    # Optimize using Sequential Quadratic Programming (SLSQP)
+        return -(expected_return / np.sqrt(variance))
+
+    # -----------------------------
+    # 7. Optimization
+    # -----------------------------
     result = minimize(
         fun=sharpe_negative,
         x0=b0,
-        args=(r, Sigma),
+        args=(exp_ret, var_ret),
         method='SLSQP',
         bounds=bounds,
-        constraints=constraints,
-        options={'disp': True}
+        constraints=constraints
     )
 
-    optimal_bets = result.x  # optimal bet distribution
+    optimal_bets = result.x
 
-    print("Optimal bet distribution:", optimal_bets)
-    print("Max Sharpe ratio:", -result.fun)
+    # -----------------------------
+    # 8. Attach to dictionary
+    # -----------------------------
+    merged = {}
+    for i, (label, prob) in classified.items():
+        merged[i] = {
+            "label": label,
+            "prob": prob,
+            "bet": float(optimal_bets[i])
+        }
+
+    return merged, -result.fun
