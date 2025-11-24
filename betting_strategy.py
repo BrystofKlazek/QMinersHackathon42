@@ -7,11 +7,11 @@ import numpy as np
 from scipy.optimize import minimize
 
 
-def betting_strategy(bookmaker_odds, outcome, sens):
+def betting(bookmaker_odds, outcome, sens):
     """
     Maximize Sharpe ratio given model probabilities and bookmaker odds.
     """
-
+    print("ok")
     # -----------------------------
     # 1. CLASSIFICATION
     # -----------------------------
@@ -34,13 +34,14 @@ def betting_strategy(bookmaker_odds, outcome, sens):
     # -----------------------------
     # 2. EXPECTED RETURN & VARIANCE
     # -----------------------------
-    exp_ret = probs * bookmaker_odds - 1                           # μ_i = p_i * o_i - 1
-    var_ret = probs * (1 - probs) * (bookmaker_odds ** 2)          # σ_i² = p(1-p)o²
+    exp_ret = np.maximum(probs * bookmaker_odds - 1, 0) 
+                          # μ_i = p_i * o_i - 1
+    var_ret = probs * (1 - probs) * (bookmaker_odds ** 2) + 1e-8         # σ_i² = p(1-p)o²
 
     # -----------------------------
     # 3. INITIAL GUESS
     # -----------------------------
-    b0 = np.zeros_like(exp_ret)  # start with 0 bets
+    b0 = np.clip(probs, 1e-3, wealth)  # start with 0 bets
     wealth = 1.0
 
     # -----------------------------
@@ -71,7 +72,8 @@ def betting_strategy(bookmaker_odds, outcome, sens):
             return np.inf
 
         return -(expected_return / np.sqrt(variance))
-
+    print("exp_ret:", exp_ret)
+    print("var_ret:", var_ret)
     # -----------------------------
     # 7. Optimization
     # -----------------------------
