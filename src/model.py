@@ -1,5 +1,17 @@
 import numpy as np
 import pandas as pd
+import math
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader, TensorDataset
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from scipy import stats
+from sklearn import metrics, datasets
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
 
 class Model:
 
@@ -9,16 +21,14 @@ class Model:
         opps: pd.DataFrame,
         inc: pd.DataFrame,
     ):
-        def clear_data(data: pd.DataFrame) -> pd.DataFrame:
-            import pandas as pd
-            import numpy as np
+        def clear_data(inc: pd.DataFrame) -> pd.DataFrame:
 
             
             """pd.reset_option('display.max_rows')
             pd.set_option('display.max_columns', None)"""
 
              
-            df = pd.read_csv("data/games.csv")
+            df = inc.copy()
             #df.head()
 
 
@@ -40,7 +50,7 @@ class Model:
             #df.info()
 
              
-            df = df.drop(columns = ["Date"]) #drop dates of games
+            #df = df.drop(columns = ["Date"]) #drop dates of games
             """print('Date' in df.columns)
             df.info()"""
 
@@ -767,6 +777,213 @@ class Model:
             feat_df = feat_df.set_index("orig_index").sort_index()
             return feat_df 
         
+        def clear_oops (oops: pd.DataFrame) -> pd.DataFrame:
+            df = oops.copy()
+            df.drop(columns=["BetH", "BetA", "BetD"], inplace=True)
+            df = df.replace([np.inf, -np.inf], np.nan)
+            df.fillna(0, inplace=True)
+            return df
+
+        def nn_train(builded_ft: pd.DataFrame):                 
+            df = builded_ft
+            df = df[df["y_draw"] == 0]
+
+             
+            df.drop(columns = ["Season", "Date", "y_draw", "elo_p_h", "market_type", "y_away_win"], inplace=True)
+
+             
+            """bookmaker_odds_H = df["oddsH"].values  # numpy array
+            bookmaker_odds_A = df["oddsA"].values""" 
+
+
+             
+            df = df.replace(np.nan,0)
+            df["Bookmaker_prob"] = (1/df["oddsH"])/(1/df["oddsH"]  + 1/df["oddsA"])
+            
+            data = df.drop(columns=[ "y_home_win", "Bookmaker_prob"]).values
+            target = df["y_home_win"].values
+            bookmaker_prob = df["Bookmaker_prob"].values
+
+            scaler = StandardScaler()
+
+            Xtrain = data.values.tolist()
+            ytrain_data = target.values.tolist()
+            bookmaker_prob_train = bookmaker_prob.values.tolist()
+            ##
+            Xtrain_data = scaler.fit_transform(Xtrain)
+
+             
+            X_train = torch.tensor(Xtrain_data, dtype=torch.float32)
+            bookmaker_prob_train = torch.tensor(bookmaker_prob_train, dtype=torch.float32).unsqueeze(1)
+            y_train = torch.tensor(ytrain_data, dtype=torch.float32).unsqueeze(1)
+
+
+
+            train_dataset = TensorDataset(X_train, bookmaker_prob_train, y_train)
+            train_loader = DataLoader(train_dataset, batch_size=64, shuffle=False) 
+
+             
+            import torch.nn.functional as F
+
+            class ProbabilityEstimatorNN(nn.Module):
+                def __init__(self, input_dim, hidden_dim=64):
+                    super().__init__()
+                    self.fc1 = nn.Linear(input_dim, hidden_dim)
+                    self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+                    self.output = nn.Linear(hidden_dim, 1)  # Single output neuron
+
+                # Xavier/Glorot initialization for hidden layers
+                    nn.init.xavier_uniform_(self.fc1.weight)
+                    nn.init.xavier_uniform_(self.fc2.weight)
+                    nn.init.zeros_(self.fc1.bias)
+                    nn.init.zeros_(self.fc2.bias)
+                    
+                    # Small random init for output layer
+                    nn.init.uniform_(self.output.weight, -0.1, 0.1)
+                    nn.init.zeros_(self.output.bias)
+
+                def forward(self, x):
+                    x = F.relu(self.fc1(x))
+                    x = F.relu(self.fc2(x))
+                    x = self.output(x)  # Outputs probabilities in [0,1]
+                    return x
+
+            import torch
+
+            def decorrelation_loss(outputs, bookmaker_prob, lambda_decorr):
+                outputs = outputs.view(-1)
+                bookmaker_prob = bookmaker_prob.view(-1)
+                cov = torch.mean((outputs - outputs.mean()) * (bookmaker_prob - bookmaker_prob.mean()))
+                loss = lambda_decorr * cov**2
+                return loss
+
+            """def decorrelation_loss(outputs, bookmaker_prob, lambda_decorr):
+                outputs = outputs.view(-1)
+                bookmaker_prob = bookmaker_prob.view(-1)
+                loss = lambda_decorr * torch.sum((outputs - bookmaker_prob).pow(2)) / outputs.size(0)
+                return loss"""
+
+            def l2_regularization(model, lambda_):
+                # Sum of squared weights (L2 norm), excluding biases
+                l2_norm = sum(
+                    torch.sum(param ** 2) 
+                    for param in model.parameters() 
+                    if param.requires_grad and param.dim() > 1
+                )
+                return lambda_ * l2_norm
+            # in training loop:
+            # outputs = model(X_batch)
+            # loss = criterion(outputs, y_batch)
+            # reg = l2_regularization(model, lambda_)
+            # total_loss = loss + reg
+            # total_loss.backward()
+
+
+
+             
+            # Suppose X_train, y_train, bookmaker_probs_train are your training data tensors
+            # X_train: (num_samples, feature_dim), y_train: (num_samples, 1), bookmaker_probs_train: (num_samples,)
+            # Wrap in Dataset and DataLoader
+            feature_dim = data.shape[1]
+            model = ProbabilityEstimatorNN(feature_dim)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+
+            criterion = nn.BCEWithLogitsLoss()
+
+            num_samples_train = X_train.shape[0]
+
+
+            # Initialize model, optimizer
+
+
+            # Hyperparameters for loss
+
+            lambda_ = 0.01
+            lambda_decorr = 0.3
+            epochs = 100
+
+
+            # Training loop
+            def train(model, optimizer, criterion, num_samples_train, lambda_decorr, epochs, train_loader, lambda_):
+                
+                for epoch in range(epochs):
+                    print(epoch)
+                    total_loss = 0
+                    for X_batch, bookmaker_batch, y_batch in train_loader:
+                        optimizer.zero_grad()
+                        outputs = model(X_batch) 
+                        #print("outputs min/max:", outputs.min().item(), outputs.max().item()) #debugging
+                        loss = criterion(outputs, y_batch) + decorrelation_loss(bookmaker_batch, outputs,lambda_decorr) + l2_regularization(model, lambda_)
+                        loss.backward() 
+                        """for name, param in model.named_parameters():
+                            if param.grad is not None:
+                                print(name, param.grad.norm().item())"""          
+                        # Backpropagation
+                        optimizer.step()           # Update parameters)
+                        total_loss += loss.item() * X_batch.size(0)
+                    avg_loss = total_loss / len(train_loader.dataset)
+
+
+                return avg_loss
+
+             
+            X_val = torch.tensor(Xval_data, dtype=torch.float32)
+            bookmaker_prob_val = torch.tensor(bookmaker_prob_val_data, dtype=torch.float32).unsqueeze(1)
+            y_val = torch.tensor(yval_data, dtype=torch.float32).unsqueeze(1)
+
+            val_dataset = TensorDataset(X_val, bookmaker_prob_val, y_val)
+            val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+
+             
+            num_samples_val = X_val.shape[0]
+
+            def predict(model, criterion, val_loader):
+                all_predictions = []
+                num_samples = 0
+                total_loss = 0
+                with torch.no_grad():
+                    for X_batch, y_batch, bookmaker_batch in val_loader:
+                        outputs = model(X_batch)
+                        loss = criterion(outputs, y_batch) #- (1/num_samples_val)*decorrel_weight*decorellation(bookmaker_batch, outputs)
+                        batch_size = X_batch.size(0)
+                        total_loss += loss.item() * batch_size
+                        num_samples += batch_size
+                        probs = torch.sigmoid(outputs).view(-1).cpu()
+                        all_predictions.append(probs)
+
+                avg_loss = total_loss / num_samples
+                #print(f"Validation Loss: {avg_loss:.4f}")
+                flat_array = torch.cat(all_predictions).numpy()
+                mse = mean_squared_error(yval_data, flat_array)
+                r2 = r2_score(yval_data, flat_array)
+
+                #print("MSE:", mse)
+                #print("R2:", r2)
+                return avg_loss, flat_array, mse, r2
+
+             
+            def accuracy(flat_array, sensitivity):
+                adjusted = np.full_like(flat_array, 0.5)  # Initialize with 0.5
+
+                mask_high = flat_array > (0.5 + sensitivity)
+                mask_low = flat_array < (0.5 - sensitivity)
+
+                adjusted[mask_high] = 1
+                adjusted[mask_low] = 0
+
+                adjusted = adjusted.reshape(-1)
+
+                acc = (adjusted == yval_data).mean()
+
+                print(f"Validation accuracy of normalized model: {acc:.4f}")
+                print(np.unique(yval_data))  
+                print("acc on making a guess:", acc*len(adjusted)/np.sum(adjusted != 0.5))
+                acc_with_making_a_guess = acc*len(adjusted)/np.sum(adjusted != 0.5)
+                volatility = np.sum(adjusted != 0.5)
+                return acc, acc_with_making_a_guess, volatility
+
+
         min_bet = summary.iloc[0]["Min_bet"]
         N = len(opps)
 
