@@ -233,133 +233,94 @@ class Model:
              
             return df
 
-        def build_features(
+def build_features(
             games_all: pd.DataFrame,
-            elo_K: float = 20.0,                  # Parameter concerning speed of ELO updates
-            elo_alpha: float = 0.99,              # Elo decay per game
-            elo_beta: float = 400.0 / np.log(10), # scale for logistic link
-            elo_home_adv: float = 50.0,           # home advantage in Elo points
-            lambda_fast: float = 0.8,             # fast EMA
-            lambda_slow: float = 0.95,             # slow EMA
+            elo_K: float = 20.0,
+            elo_alpha: float = 0.99,
+            elo_beta: float = 400.0 / np.log(10),
+            elo_home_adv: float = 50.0,
+            lambda_fast: float = 0.8,
+            lambda_slow: float = 0.95,
             lambda_h2h: float = 0.2
         ) -> pd.DataFrame:
             df = games_all.copy()
             df["Date"] = pd.to_datetime(df["Date"])
 
-            # Sort in time order -  preserve original index
+            # Sort chronologically to simulate time passing
             df = df.sort_values(["Date", "Season", "HID", "AID"]).reset_index(drop=False)
             df.rename(columns={"index": "orig_index"}, inplace=True)
 
             team_ids = pd.unique(pd.concat([df["HID"], df["AID"]]))
 
-            # Elo ratings for each team id - build a DICT so it is easily accesible
+            # --- State Initialization ---
             elo = {tid: 0.0 for tid in team_ids}
-
-            # Last game date and also streaks - streak I think could beand also streaks - streak I think could be valuablee
             last_date = {tid: None for tid in team_ids}
             home_streak = {tid: 0 for tid in team_ids}
             away_streak = {tid: 0 for tid in team_ids}
-
-            #Standing in current season - also DICTs so that it is easily accesible 
+            
             points = {tid: 0.0 for tid in team_ids}
             games_season = {tid: 0 for tid in team_ids}
             goal_diff_season = {tid: 0.0 for tid in team_ids}
             wins_reg = {tid: 0 for tid in team_ids}
 
-            # Per-team goal and period stats (EMAs)
-            # GF - goals for, GA -goals against, p1 - part 1, OT - overtime, 
             def init_team_stats():
                 return {
-                    "gf_fast": 0.0,
-                    "ga_fast": 0.0,
-                    "gf_slow": 0.0,
-                    "ga_slow": 0.0,
-                    "gf_p1_fast": 0.0,
-                    "ga_p1_fast": 0.0,
-                    "gf_p2_fast": 0.0,
-                    "ga_p2_fast": 0.0,
-                    "gf_p3_fast": 0.0,
-                    "ga_p3_fast": 0.0,
-                    "gf_p1_slow": 0.0,
-                    "ga_p1_slow": 0.0,
-                    "gf_p2_slow": 0.0,
-                    "ga_p2_slow": 0.0,
-                    "gf_p3_slow": 0.0,
-                    "ga_p3_slow": 0.0,
-                    "ot_rate_fast": 0.0,
-                    "ot_win_rate_fast": 0.0,
-                    "games_with_periods": 0,
+                    "gf_fast": 0.0, "ga_fast": 0.0, "gf_slow": 0.0, "ga_slow": 0.0,
+                    "gf_p1_fast": 0.0, "ga_p1_fast": 0.0, "gf_p2_fast": 0.0, "ga_p2_fast": 0.0,
+                    "gf_p3_fast": 0.0, "ga_p3_fast": 0.0,
+                    "gf_p1_slow": 0.0, "ga_p1_slow": 0.0, "gf_p2_slow": 0.0, "ga_p2_slow": 0.0,
+                    "gf_p3_slow": 0.0, "ga_p3_slow": 0.0,
+                    "ot_rate_fast": 0.0, "ot_win_rate_fast": 0.0, "games_with_periods": 0,
                 }
-
+            
             team_stats = {tid: init_team_stats() for tid in team_ids}
-
-            # Advanced stats EMAs
-            # SOG - shots at goalie, PIM - penalties in minutes, PPG - power play goals, 
-            # SHG - short handed goals, SVPCT - save procentage, FO_share - face off share 
+            
             def init_adv_stats():
                 return {
-                    "sog_for_fast": 0.0,
-                    "sog_against_fast": 0.0,
-                    "sog_for_slow": 0.0,
-                    "sog_against_slow": 0.0,
-                    "sog_share_fast": 0.5,
-                    "sog_share_slow": 0.5,
-                    "pim_for_fast": 0.0,
-                    "pim_against_fast": 0.0,
-                    "ppg_fast": 0.0,
-                    "shg_fast": 0.0,
-                    "svpct_fast": 0.9,
-                    "hits_diff_fast": 0.0,
-                    "blocks_diff_fast": 0.0,
-                    "fo_share_fast": 0.5,
-                    "adv_games": 0,
+                    "sog_for_fast": 0.0, "sog_against_fast": 0.0, "sog_for_slow": 0.0, "sog_against_slow": 0.0,
+                    "sog_share_fast": 0.5, "sog_share_slow": 0.5,
+                    "pim_for_fast": 0.0, "pim_against_fast": 0.0,
+                    "ppg_fast": 0.0, "shg_fast": 0.0, "svpct_fast": 0.9,
+                    "hits_diff_fast": 0.0, "blocks_diff_fast": 0.0, "fo_share_fast": 0.5, "adv_games": 0,
                 }
 
             adv_stats = {tid: init_adv_stats() for tid in team_ids}
-
-            # Head-to-head stats keyed by (home_team, away_team) so we know history
-            # of team vs team
             h2h = {}
-
             feature_rows = []
             current_season = None
 
             def compute_scores(row):
-                #Home and away scores for Elo, distributed in [0,1]
-                if row["H"] == 1:
-                    return 1.0, 0.0
-                elif row["A"] == 1:
-                    return 0.0, 1.0
-                elif row["D"] == 1:
-                    return 0.5, 0.5
+                if row["H"] == 1: return 1.0, 0.0
+                elif row["A"] == 1: return 0.0, 1.0
+                elif row["D"] == 1: return 0.5, 0.5
+                return 0.5, 0.5
 
-            # now iterate over rows and seasons, h, a...
+            # --- Main Loop ---
             for _, row in df.iterrows():
                 season = row["Season"]
                 date = row["Date"]
                 h = row["HID"]
                 a = row["AID"]
 
-                # If season changes - reset season standings?
+                # Season Reset
                 if current_season is None or season != current_season:
-                    # If we arrive into a larger number in dataframe,  startt a new season
                     current_season = season
                     points = {tid: 0.0 for tid in team_ids}
                     games_season = {tid: 0 for tid in team_ids}
                     goal_diff_season = {tid: 0.0 for tid in team_ids}
                     wins_reg = {tid: 0 for tid in team_ids}
 
-                # Elo decay towards 0 for now (maybe for mean later)? 
+                # Elo Decay
                 elo[h] *= elo_alpha
                 elo[a] *= elo_alpha
 
-                # Pre-match Elo and Elo-probability
+                # Current ELO
                 elo_h = elo[h]
                 elo_a = elo[a]
                 elo_diff = (elo_h + elo_home_adv) - elo_a
                 elo_p_h = 1.0 / (1.0 + math.exp(-elo_diff / elo_beta))
 
-                # Number of rest days or back-to-back fights (could provide useful info? IDK)
+                # Fatigue
                 last_h = last_date[h]
                 last_a = last_date[a]
                 rest_h = (date - last_h).days if last_h is not None else np.nan
@@ -367,416 +328,249 @@ class Model:
                 back_to_back_h = 1 if rest_h == 1 else 0 if not math.isnan(rest_h) else 0
                 back_to_back_a = 1 if rest_a == 1 else 0 if not math.isnan(rest_a) else 0
 
-                # Now set season standings  
-                pts_h = points[h]
-                pts_a = points[a]
-                gms_h = games_season[h]
-                gms_a = games_season[a]
-                gd_h = goal_diff_season[h]
-                gd_a = goal_diff_season[a]
+                # Standings
+                pts_pg_h = points[h] / games_season[h] if games_season[h] > 0 else 0.0
+                pts_pg_a = points[a] / games_season[a] if games_season[a] > 0 else 0.0
+                gd_pg_h = goal_diff_season[h] / games_season[h] if games_season[h] > 0 else 0.0
+                gd_pg_a = goal_diff_season[a] / games_season[a] if games_season[a] > 0 else 0.0
 
-                pts_pg_h = pts_h / gms_h if gms_h > 0 else 0.0
-                pts_pg_a = pts_a / gms_a if gms_a > 0 else 0.0
-                gd_pg_h = gd_h / gms_h if gms_h > 0 else 0.0
-                gd_pg_a = gd_a / gms_a if gms_a > 0 else 0.0
-
-                # Pre-match stats
+                # Stats Features (Calculated using current state)
                 def per_team_period_features(ts):
-                    gf_tot_slow = ts["gf_p1_slow"] + ts["gf_p2_slow"] + ts["gf_p3_slow"]
-                    if gf_tot_slow <= 0:
-                        # if we don't know the distribution of goals set them uniformly distributed
-                        # Before the first match with each goal or something?
-                        p1_share = p2_share = p3_share = 1.0 / 3.0 
+                    gf_tot = ts["gf_p1_slow"] + ts["gf_p2_slow"] + ts["gf_p3_slow"]
+                    if gf_tot <= 0:
+                         p1s = p2s = p3s = 1.0/3.0
                     else:
-                        p1_share = ts["gf_p1_slow"] / gf_tot_slow
-                        p2_share = ts["gf_p2_slow"] / gf_tot_slow
-                        p3_share = ts["gf_p3_slow"] / gf_tot_slow
-                    third_period_diff = ts["gf_p3_slow"] - ts["ga_p3_slow"]
+                        p1s = ts["gf_p1_slow"]/gf_tot
+                        p2s = ts["gf_p2_slow"]/gf_tot
+                        p3s = ts["gf_p3_slow"]/gf_tot
+                    
                     return {
-                        "gf_fast": ts["gf_fast"],
-                        "ga_fast": ts["ga_fast"],
-                        "gf_slow": ts["gf_slow"],
-                        "ga_slow": ts["ga_slow"],
-                        "gf_p1_fast": ts["gf_p1_fast"],
-                        "gf_p2_fast": ts["gf_p2_fast"],
-                        "gf_p3_fast": ts["gf_p3_fast"],
-                        "ga_p1_fast": ts["ga_p1_fast"],
-                        "ga_p2_fast": ts["ga_p2_fast"],
-                        "ga_p3_fast": ts["ga_p3_fast"],
-                        "gf_p1_share": p1_share,
-                        "gf_p2_share": p2_share,
-                        "gf_p3_share": p3_share,
-                        #Chat says the most useful is third period goal difference and that
-                        #Setting it explicitly for now might not hurt
-                        "third_period_goal_diff": third_period_diff,
-                        "ot_rate_fast": ts["ot_rate_fast"],
-                        "ot_win_rate_fast": ts["ot_win_rate_fast"],
+                        "gf_fast": ts["gf_fast"], "ga_fast": ts["ga_fast"],
+                        "gf_slow": ts["gf_slow"], "ga_slow": ts["ga_slow"],
+                        "gf_p1_fast": ts["gf_p1_fast"], "gf_p2_fast": ts["gf_p2_fast"], "gf_p3_fast": ts["gf_p3_fast"],
+                        "ga_p1_fast": ts["ga_p1_fast"], "ga_p2_fast": ts["ga_p2_fast"], "ga_p3_fast": ts["ga_p3_fast"],
+                        "gf_p1_share": p1s, "gf_p2_share": p2s, "gf_p3_share": p3s,
+                        "third_period_goal_diff": ts["gf_p3_slow"] - ts["ga_p3_slow"],
+                        "ot_rate_fast": ts["ot_rate_fast"], "ot_win_rate_fast": ts["ot_win_rate_fast"]
                     }
 
-                ts_h = team_stats[h]
-                ts_a = team_stats[a]
-                #Stats per team for easy access later
-                per_h = per_team_period_features(ts_h)
-                per_a = per_team_period_features(ts_a) 
-
-                # Advanced stats pre game
+                per_h = per_team_period_features(team_stats[h])
+                per_a = per_team_period_features(team_stats[a]) 
                 adv_h = adv_stats[h]
                 adv_a = adv_stats[a]
 
-                # Head-to-heads pre game 
+                # H2H
                 key_ha = (h, a)
                 if key_ha in h2h:
-                    h2h_entry = h2h[key_ha]
-                    h2h_win_rate = h2h_entry["win_ema"]
-                    h2h_goal_diff_pg = h2h_entry["goal_diff_ema"]
-                    h2h_games = h2h_entry["count"]
+                    h2h_wr = h2h[key_ha]["win_ema"]
+                    h2h_gd = h2h[key_ha]["goal_diff_ema"]
+                    h2h_cnt = h2h[key_ha]["count"]
                 else:
-                    h2h_win_rate = 0.5
-                    h2h_goal_diff_pg = 0.0
-                    h2h_games = 0
+                    h2h_wr = 0.5
+                    h2h_gd = 0.0
+                    h2h_cnt = 0
 
-                # Implied market probabilities from 2-way odds
-                oddsH = row["OddsH"]
-                oddsA = row["OddsA"]
+                oddsH = row.get("OddsH")
+                oddsA = row.get("OddsA")
 
-                # Build feature row BEFORE updating states
-                feature_rows.append(
-                    {
-                        "orig_index": row["orig_index"],
-                        "Season": season,
-                        "Date": date,
-                        "HID": h,
-                        "AID": a,
-                        "market_type": row["market_type"],
-                        "y_home_win": row["H"],
-                        "y_away_win": row["A"],
-                        "y_draw": row["D"],
-                        # Odds features
-                        "oddsH": oddsH,
-                        "oddsA": oddsA,
-                        # Elo
-                        "elo_h": elo_h,
-                        "elo_a": elo_a,
-                        "elo_diff": elo_diff,
-                        "elo_p_h": elo_p_h,
-                        # Season standings
-                        "pts_pg_h": pts_pg_h,
-                        "pts_pg_a": pts_pg_a,
-                        "gd_pg_h": gd_pg_h,
-                        "gd_pg_a": gd_pg_a,
-                        "games_season_h": gms_h,
-                        "games_season_a": gms_a,
-                        # Schedule or fatigue or smth
-                        "rest_days_h": rest_h,
-                        "rest_days_a": rest_a,
-                        # Who is more rested
-                        "rest_diff": (
-                            rest_h - rest_a
-                            if (not math.isnan(rest_h) and not math.isnan(rest_a))
-                            else np.nan
-                        ),
-                        "back_to_back_h": back_to_back_h,
-                        "back_to_back_a": back_to_back_a,
-                        "home_streak_h": home_streak[h],
-                        "away_streak_a": away_streak[a],
-                        # Per-period & goals: home and away (prefixed h_/a_)
-                        **{f"h_{k}": v for k, v in per_h.items()},
-                        **{f"a_{k}": v for k, v in per_a.items()},
-                        # Differences
-                        "gf_fast_diff": per_h["gf_fast"] - per_a["gf_fast"],
-                        "ga_fast_diff": per_h["ga_fast"] - per_a["ga_fast"],
-                        "gf_slow_diff": per_h["gf_slow"] - per_a["gf_slow"],
-                        "ga_slow_diff": per_h["ga_slow"] - per_a["ga_slow"],
-                        "gf_p1_share_diff": per_h["gf_p1_share"]
-                        - per_a["gf_p1_share"],
-                        "gf_p2_share_diff": per_h["gf_p2_share"]
-                        - per_a["gf_p2_share"],
-                        "gf_p3_share_diff": per_h["gf_p3_share"]
-                        - per_a["gf_p3_share"],
-                        "third_period_goal_diff_diff": per_h[
-                            "third_period_goal_diff"
-                        ]
-                        - per_a["third_period_goal_diff"],
-                        # Advanced stats - hope that this is correclty  
-                        "sog_for_fast_h": adv_h["sog_for_fast"],
-                        "sog_against_fast_h": adv_h["sog_against_fast"],
-                        "sog_share_fast_h": adv_h["sog_share_fast"],
-                        "pim_for_fast_h": adv_h["pim_for_fast"],
-                        "pim_against_fast_h": adv_h["pim_against_fast"],
-                        "ppg_fast_h": adv_h["ppg_fast"],
-                        "shg_fast_h": adv_h["shg_fast"],
-                        "svpct_fast_h": adv_h["svpct_fast"],
-                        "hits_diff_fast_h": adv_h["hits_diff_fast"],
-                        "blocks_diff_fast_h": adv_h["blocks_diff_fast"],
-                        "fo_share_fast_h": adv_h["fo_share_fast"],
-                        "sog_for_fast_a": adv_a["sog_for_fast"],
-                        "sog_against_fast_a": adv_a["sog_against_fast"],
-                        "sog_share_fast_a": adv_a["sog_share_fast"],
-                        "pim_for_fast_a": adv_a["pim_for_fast"],
-                        "pim_against_fast_a": adv_a["pim_against_fast"],
-                        "ppg_fast_a": adv_a["ppg_fast"],
-                        "shg_fast_a": adv_a["shg_fast"],
-                        "svpct_fast_a": adv_a["svpct_fast"],
-                        "hits_diff_fast_a": adv_a["hits_diff_fast"],
-                        "blocks_diff_fast_a": adv_a["blocks_diff_fast"],
-                        "fo_share_fast_a": adv_a["fo_share_fast"],
-                        "sog_share_fast_diff": adv_h["sog_share_fast"]
-                        - adv_a["sog_share_fast"],
-                        "pim_for_fast_diff": adv_h["pim_for_fast"]
-                        - adv_a["pim_for_fast"],
-                        "svpct_fast_sum": adv_h["svpct_fast"]
-                        + adv_a["svpct_fast"],
-                        "fo_share_fast_diff": adv_h["fo_share_fast"]
-                        - adv_a["fo_share_fast"],
-                        # Head-to-head stats
-                        "h2h_win_rate_ha": h2h_win_rate,
-                        "h2h_goal_diff_pg_ha": h2h_goal_diff_pg,
-                        "h2h_games_ha": h2h_games,
-                    }
-                )
+                # --- BUILD ROW (Full Feature Set) ---
+                feature_rows.append({
+                    "orig_index": row["orig_index"],
+                    "is_opp": row["is_opp"], 
+                    "Season": season, "Date": date, "HID": h, "AID": a,
+                    "market_type": row.get("market_type", "2way"),
+                    "y_home_win": row.get("H"), "y_away_win": row.get("A"), "y_draw": row.get("D"),
+                    "oddsH": oddsH, "oddsA": oddsA,
+                    
+                    "elo_h": elo_h, "elo_a": elo_a, "elo_diff": elo_diff, "elo_p_h": elo_p_h,
+                    
+                    "pts_pg_h": pts_pg_h, "pts_pg_a": pts_pg_a,
+                    "gd_pg_h": gd_pg_h, "gd_pg_a": gd_pg_a,
+                    "games_season_h": games_season[h], "games_season_a": games_season[a],
+                    
+                    "rest_days_h": rest_h, "rest_days_a": rest_a,
+                    "rest_diff": (rest_h - rest_a) if pd.notna(rest_h) and pd.notna(rest_a) else np.nan,
+                    "back_to_back_h": back_to_back_h, "back_to_back_a": back_to_back_a,
+                    "home_streak_h": home_streak[h], "away_streak_a": away_streak[a],
+                    
+                    # Unpack raw per-team columns (ALL GF/GA/Period stats)
+                    **{f"h_{k}": v for k, v in per_h.items()},
+                    **{f"a_{k}": v for k, v in per_a.items()},
+                    
+                    # Calculated Diffs
+                    "gf_fast_diff": per_h["gf_fast"] - per_a["gf_fast"],
+                    "ga_fast_diff": per_h["ga_fast"] - per_a["ga_fast"],
+                    "gf_slow_diff": per_h["gf_slow"] - per_a["gf_slow"],
+                    "ga_slow_diff": per_h["ga_slow"] - per_a["ga_slow"],
+                    "gf_p1_share_diff": per_h["gf_p1_share"] - per_a["gf_p1_share"],
+                    "gf_p2_share_diff": per_h["gf_p2_share"] - per_a["gf_p2_share"],
+                    "gf_p3_share_diff": per_h["gf_p3_share"] - per_a["gf_p3_share"],
+                    "third_period_goal_diff_diff": per_h["third_period_goal_diff"] - per_a["third_period_goal_diff"],
+                    
+                    # Advanced Stats Raw
+                    "sog_for_fast_h": adv_h["sog_for_fast"], "sog_against_fast_h": adv_h["sog_against_fast"],
+                    "sog_share_fast_h": adv_h["sog_share_fast"],
+                    "pim_for_fast_h": adv_h["pim_for_fast"], "pim_against_fast_h": adv_h["pim_against_fast"],
+                    "ppg_fast_h": adv_h["ppg_fast"], "shg_fast_h": adv_h["shg_fast"],
+                    "svpct_fast_h": adv_h["svpct_fast"],
+                    "hits_diff_fast_h": adv_h["hits_diff_fast"], "blocks_diff_fast_h": adv_h["blocks_diff_fast"],
+                    "fo_share_fast_h": adv_h["fo_share_fast"],
+                    
+                    "sog_for_fast_a": adv_a["sog_for_fast"], "sog_against_fast_a": adv_a["sog_against_fast"],
+                    "sog_share_fast_a": adv_a["sog_share_fast"],
+                    "pim_for_fast_a": adv_a["pim_for_fast"], "pim_against_fast_a": adv_a["pim_against_fast"],
+                    "ppg_fast_a": adv_a["ppg_fast"], "shg_fast_a": adv_a["shg_fast"],
+                    "svpct_fast_a": adv_a["svpct_fast"],
+                    "hits_diff_fast_a": adv_a["hits_diff_fast"], "blocks_diff_fast_a": adv_a["blocks_diff_fast"],
+                    "fo_share_fast_a": adv_a["fo_share_fast"],
+                    
+                    # Advanced Stats Diffs
+                    "sog_share_fast_diff": adv_h["sog_share_fast"] - adv_a["sog_share_fast"],
+                    "pim_for_fast_diff": adv_h["pim_for_fast"] - adv_a["pim_for_fast"],
+                    "svpct_fast_sum": adv_h["svpct_fast"] + adv_a["svpct_fast"],
+                    "fo_share_fast_diff": adv_h["fo_share_fast"] - adv_a["fo_share_fast"],
+                    
+                    # H2H
+                    "h2h_win_rate_ha": h2h_wr,
+                    "h2h_goal_diff_pg_ha": h2h_gd,
+                    "h2h_games_ha": h2h_cnt,
+                })
 
-                # --------- STAT UPDATE AFTER GAME ---------#
+                # --- 5. UPDATE STATE (Only for History games) ---
+                if row["is_opp"] == False:
+                    # Sanity check for results
+                    if pd.isna(row.get("HS")) or pd.isna(row.get("AS")):
+                        continue
 
-                # Elo updat updatee
-                S_h, S_a = compute_scores(row)
-                goal_diff = (row["HS"] or 0) - (row["AS"] or 0)
-                margin_factor = 1.0
-                if goal_diff != 0:
-                    margin_factor = 1.0 + 0.5 * math.log(1 + abs(goal_diff))
+                    S_h, S_a = compute_scores(row)
+                    goal_diff = row["HS"] - row["AS"]
+                    margin_factor = 1.0 + 0.5 * math.log(1 + abs(goal_diff)) if goal_diff != 0 else 1.0
+                    elo[h] += elo_K * (S_h - elo_p_h) * margin_factor
+                    elo[a] += elo_K * (S_a - (1.0 - elo_p_h)) * margin_factor
 
-                elo[h] = elo_h + elo_K * (S_h - elo_p_h) * margin_factor
-                elo[a] = elo_a + elo_K * (S_a - (1.0 - elo_p_h)) * margin_factor
+                    last_date[h] = date; last_date[a] = date
+                    home_streak[h] = home_streak.get(h, 0) + 1; away_streak[h] = 0
+                    away_streak[a] = away_streak.get(a, 0) + 1; home_streak[a] = 0
 
-                # calculate streaks etc from last date played
-                last_date[h] = date
-                last_date[a] = date
+                    ph, pa = compute_scores(row)
+                    points[h] += ph; points[a] += pa
+                    games_season[h] += 1; games_season[a] += 1
+                    goal_diff_season[h] += goal_diff; goal_diff_season[a] -= goal_diff
+                    if S_h == 1.0 and (row.get("H_OT", 0) == 0 and row.get("H_SO", 0) == 0):
+                        wins_reg[h] += 1
 
-                home_streak[h] = home_streak.get(h, 0) + 1
-                away_streak[h] = 0
-                away_streak[a] = away_streak.get(a, 0) + 1
-                home_streak[a] = 0
+                    hs, as_ = row["HS"], row["AS"]
+                    ts_h = team_stats[h]
+                    ts_a = team_stats[a]
 
-                # new standings (NOT ELO! goals etc.)
-                ph, pa = compute_scores(row)
-                points[h] += ph
-                points[a] += pa
-                games_season[h] += 1
-                games_season[a] += 1
-                goal_diff_season[h] += goal_diff
-                goal_diff_season[a] -= goal_diff
-                if S_h == 1.0 and (row["H_OT"] == 0 and row["H_SO"] == 0):
-                    wins_reg[h] += 1
+                    def update_ema(old, new, lam): return lam * old + (1-lam) * new
 
-                # goals - per-period EMAs
-                hs = 0 if pd.isna(row["HS"]) else row["HS"]
-                ars = 0 if pd.isna(row["AS"]) else row["AS"]
+                    ts_h["gf_fast"] = update_ema(ts_h["gf_fast"], hs, lambda_fast)
+                    ts_h["ga_fast"] = update_ema(ts_h["ga_fast"], as_, lambda_fast)
+                    ts_a["gf_fast"] = update_ema(ts_a["gf_fast"], as_, lambda_fast)
+                    ts_a["ga_fast"] = update_ema(ts_a["ga_fast"], hs, lambda_fast)
 
-                ts_h["gf_fast"] = lambda_fast * ts_h["gf_fast"] + (1 - lambda_fast) * hs
-                ts_h["ga_fast"] = lambda_fast * ts_h["ga_fast"] + (1 - lambda_fast) * ars
-                ts_a["gf_fast"] = lambda_fast * ts_a["gf_fast"] + (1 - lambda_fast) * ars
-                ts_a["ga_fast"] = lambda_fast * ts_a["ga_fast"] + (1 - lambda_fast) * hs
+                    ts_h["gf_slow"] = update_ema(ts_h["gf_slow"], hs, lambda_slow)
+                    ts_h["ga_slow"] = update_ema(ts_h["ga_slow"], as_, lambda_slow)
+                    ts_a["gf_slow"] = update_ema(ts_a["gf_slow"], as_, lambda_slow)
+                    ts_a["ga_slow"] = update_ema(ts_a["ga_slow"], hs, lambda_slow)
 
-                ts_h["gf_slow"] = lambda_slow * ts_h["gf_slow"] + (1 - lambda_slow) * hs
-                ts_h["ga_slow"] = lambda_slow * ts_h["ga_slow"] + (1 - lambda_slow) * ars
-                ts_a["gf_slow"] = lambda_slow * ts_a["gf_slow"] + (1 - lambda_slow) * ars
-                ts_a["ga_slow"] = lambda_slow * ts_a["ga_slow"] + (1 - lambda_slow) * hs
+                    # Period stats update
+                    for side, tid, ts in [("H", h, ts_h), ("A", a, ts_a)]:
+                        gf1 = row.get(f"{side}_P1", 0); gf2 = row.get(f"{side}_P2", 0); gf3 = row.get(f"{side}_P3", 0)
+                        o_side = "A" if side == "H" else "H"
+                        ga1 = row.get(f"{o_side}_P1", 0); ga2 = row.get(f"{o_side}_P2", 0); ga3 = row.get(f"{o_side}_P3", 0)
 
-                # new prematch stats for both sides
-                for side, tid, ts in [("H", h, ts_h), ("A", a, ts_a)]:
-                    gf1 = 0 if pd.isna(row[f"{side}_P1"]) else row[f"{side}_P1"]
-                    gf2 = 0 if pd.isna(row[f"{side}_P2"]) else row[f"{side}_P2"]
-                    gf3 = 0 if pd.isna(row[f"{side}_P3"]) else row[f"{side}_P3"]
+                        ts["gf_p1_fast"] = update_ema(ts["gf_p1_fast"], gf1, lambda_fast)
+                        ts["gf_p2_fast"] = update_ema(ts["gf_p2_fast"], gf2, lambda_fast)
+                        ts["gf_p3_fast"] = update_ema(ts["gf_p3_fast"], gf3, lambda_fast)
+                        ts["ga_p1_fast"] = update_ema(ts["ga_p1_fast"], ga1, lambda_fast)
+                        ts["ga_p2_fast"] = update_ema(ts["ga_p2_fast"], ga2, lambda_fast)
+                        ts["ga_p3_fast"] = update_ema(ts["ga_p3_fast"], ga3, lambda_fast)
 
-                    o_side = "A" if side == "H" else "H"
-                    ga1 = 0 if pd.isna(row[f"{o_side}_P1"]) else row[f"{o_side}_P1"]
-                    ga2 = 0 if pd.isna(row[f"{o_side}_P2"]) else row[f"{o_side}_P2"]
-                    ga3 = 0 if pd.isna(row[f"{o_side}_P3"]) else row[f"{o_side}_P3"]
+                        ts["gf_p1_slow"] = update_ema(ts["gf_p1_slow"], gf1, lambda_slow)
+                        ts["gf_p2_slow"] = update_ema(ts["gf_p2_slow"], gf2, lambda_slow)
+                        ts["gf_p3_slow"] = update_ema(ts["gf_p3_slow"], gf3, lambda_slow)
+                        ts["ga_p1_slow"] = update_ema(ts["ga_p1_slow"], ga1, lambda_slow)
+                        ts["ga_p2_slow"] = update_ema(ts["ga_p2_slow"], ga2, lambda_slow)
+                        ts["ga_p3_slow"] = update_ema(ts["ga_p3_slow"], ga3, lambda_slow)
 
-                    ts["gf_p1_fast"] = lambda_fast * ts["gf_p1_fast"] + (
-                        1 - lambda_fast
-                    ) * gf1
-                    ts["gf_p2_fast"] = lambda_fast * ts["gf_p2_fast"] + (
-                        1 - lambda_fast
-                    ) * gf2
-                    ts["gf_p3_fast"] = lambda_fast * ts["gf_p3_fast"] + (
-                        1 - lambda_fast
-                    ) * gf3
-                    ts["ga_p1_fast"] = lambda_fast * ts["ga_p1_fast"] + (
-                        1 - lambda_fast
-                    ) * ga1
-                    ts["ga_p2_fast"] = lambda_fast * ts["ga_p2_fast"] + (
-                        1 - lambda_fast
-                    ) * ga2
-                    ts["ga_p3_fast"] = lambda_fast * ts["ga_p3_fast"] + (
-                        1 - lambda_fast
-                    ) * ga3
-
-                    ts["gf_p1_slow"] = lambda_slow * ts["gf_p1_slow"] + (
-                        1 - lambda_slow
-                    ) * gf1
-                    ts["gf_p2_slow"] = lambda_slow * ts["gf_p2_slow"] + (
-                        1 - lambda_slow
-                    ) * gf2
-                    ts["gf_p3_slow"] = lambda_slow * ts["gf_p3_slow"] + (
-                        1 - lambda_slow
-                    ) * gf3
-                    ts["ga_p1_slow"] = lambda_slow * ts["ga_p1_slow"] + (
-                        1 - lambda_slow
-                    ) * ga1
-                    ts["ga_p2_slow"] = lambda_slow * ts["ga_p2_slow"] + (
-                        1 - lambda_slow
-                    ) * ga2
-                    ts["ga_p3_slow"] = lambda_slow * ts["ga_p3_slow"] + (
-                        1 - lambda_slow
-                    ) * ga3
-
-                # OT and SO behaviour
-                for side, tid, ts in [("H", h, ts_h), ("A", a, ts_a)]:
-                    ot_game = (
-                        row["H_OT"] + row["A_OT"] + row["H_SO"] + row["A_SO"]
-                    ) > 0
-                    ot_game = 1.0 if ot_game else 0.0
-                    if ot_game:
-                        if side == "H":
-                            win_ots = 1.0 if (row["H_OT"] + row["H_SO"]) > 0 else 0.0
-                        else:
-                            win_ots = 1.0 if (row["A_OT"] + row["A_SO"]) > 0 else 0.0
-                    else:
+                    # OT/SO update
+                    for side, tid, ts in [("H", h, ts_h), ("A", a, ts_a)]:
+                        is_ot = (row.get("H_OT",0) + row.get("A_OT",0) + row.get("H_SO",0) + row.get("A_SO",0)) > 0
+                        ot_val = 1.0 if is_ot else 0.0
                         win_ots = 0.0
-                    ts["ot_rate_fast"] = lambda_fast * ts["ot_rate_fast"] + (
-                        1 - lambda_fast
-                    ) * ot_game
-                    ts["ot_win_rate_fast"] = lambda_fast * ts["ot_win_rate_fast"] + (
-                        1 - lambda_fast
-                    ) * win_ots
+                        if is_ot:
+                            if side == "H": win_ots = 1.0 if (row.get("H_OT",0) + row.get("H_SO",0)) > 0 else 0.0
+                            else: win_ots = 1.0 if (row.get("A_OT",0) + row.get("A_SO",0)) > 0 else 0.0
+                        
+                        ts["ot_rate_fast"] = update_ema(ts["ot_rate_fast"], ot_val, lambda_fast)
+                        ts["ot_win_rate_fast"] = update_ema(ts["ot_win_rate_fast"], win_ots, lambda_fast)
 
-                # Advanced stats computation
-                if row["has_adv_stats"]:
-                    # Calculate SOG
-                    H_SOG = 0 if pd.isna(row["H_SOG"]) else row["H_SOG"]
-                    A_SOG = 0 if pd.isna(row["A_SOG"]) else row["A_SOG"]
-                    total_sog = H_SOG + A_SOG if H_SOG + A_SOG > 0 else 1.0
-                    sog_share_h = H_SOG / total_sog
-                    sog_share_a = A_SOG / total_sog
+                    # Advanced Stats Update
+                    if row.get("has_adv_stats", False) or row.get("H_SOG", 0) > 0:
+                        h_sog, a_sog = row.get("H_SOG",0), row.get("A_SOG",0)
+                        tot_sog = h_sog + a_sog if (h_sog+a_sog)>0 else 1
+                        
+                        # SOG
+                        for side, tid, adv, sog_for, sog_against, sog_share in [
+                            ("H", h, adv_h, h_sog, a_sog, h_sog/tot_sog),
+                            ("A", a, adv_a, a_sog, h_sog, a_sog/tot_sog),
+                        ]:
+                            adv["sog_for_fast"] = update_ema(adv["sog_for_fast"], sog_for, lambda_fast)
+                            adv["sog_against_fast"] = update_ema(adv["sog_against_fast"], sog_against, lambda_fast)
+                            adv["sog_for_slow"] = update_ema(adv["sog_for_slow"], sog_for, lambda_slow)
+                            adv["sog_against_slow"] = update_ema(adv["sog_against_slow"], sog_against, lambda_slow)
+                            adv["sog_share_fast"] = update_ema(adv["sog_share_fast"], sog_share, lambda_fast)
 
-                    for side, tid, adv, sog_for, sog_against, sog_share in [
-                        ("H", h, adv_h, H_SOG, A_SOG, sog_share_h),
-                        ("A", a, adv_a, A_SOG, H_SOG, sog_share_a),
-                    ]:
-                        adv["sog_for_fast"] = lambda_fast * adv["sog_for_fast"] + (
-                            1 - lambda_fast
-                        ) * sog_for
-                        adv["sog_against_fast"] = lambda_fast * adv[
-                            "sog_against_fast"
-                        ] + (1 - lambda_fast) * sog_against
-                        adv["sog_for_slow"] = lambda_slow * adv["sog_for_slow"] + (
-                            1 - lambda_slow
-                        ) * sog_for
-                        adv["sog_against_slow"] = lambda_slow * adv[
-                            "sog_against_slow"
-                        ] + (1 - lambda_slow) * sog_against
-                        adv["sog_share_fast"] = lambda_fast * adv[
-                            "sog_share_fast"
-                        ] + (1 - lambda_fast) * sog_share
+                        # PIM, PPG, SHG
+                        H_PIM = row.get("H_PIM", 0); A_PIM = row.get("A_PIM", 0)
+                        adv_h["pim_for_fast"] = update_ema(adv_h["pim_for_fast"], H_PIM, lambda_fast)
+                        adv_h["pim_against_fast"] = update_ema(adv_h["pim_against_fast"], A_PIM, lambda_fast)
+                        adv_a["pim_for_fast"] = update_ema(adv_a["pim_for_fast"], A_PIM, lambda_fast)
+                        adv_a["pim_against_fast"] = update_ema(adv_a["pim_against_fast"], H_PIM, lambda_fast)
 
-                    # Calculate PIM
-                    H_PIM = 0 if pd.isna(row["H_PIM"]) else row["H_PIM"]
-                    A_PIM = 0 if pd.isna(row["A_PIM"]) else row["A_PIM"]
-                    adv_h["pim_for_fast"] = lambda_fast * adv_h["pim_for_fast"] + (
-                        1 - lambda_fast
-                    ) * H_PIM
-                    adv_h["pim_against_fast"] = lambda_fast * adv_h[
-                        "pim_against_fast"
-                    ] + (1 - lambda_fast) * A_PIM
-                    adv_a["pim_for_fast"] = lambda_fast * adv_a["pim_for_fast"] + (
-                        1 - lambda_fast
-                    ) * A_PIM
-                    adv_a["pim_against_fast"] = lambda_fast * adv_a[
-                        "pim_against_fast"
-                    ] + (1 - lambda_fast) * H_PIM
+                        H_PPG = row.get("H_PPG", 0); A_PPG = row.get("A_PPG", 0)
+                        H_SHG = row.get("H_SHG", 0); A_SHG = row.get("A_SHG", 0)
+                        adv_h["ppg_fast"] = update_ema(adv_h["ppg_fast"], H_PPG, lambda_fast)
+                        adv_a["ppg_fast"] = update_ema(adv_a["ppg_fast"], A_PPG, lambda_fast)
+                        adv_h["shg_fast"] = update_ema(adv_h["shg_fast"], H_SHG, lambda_fast)
+                        adv_a["shg_fast"] = update_ema(adv_a["shg_fast"], A_SHG, lambda_fast)
 
-                    # Calculate PPG and SHG
-                    H_PPG = 0 if pd.isna(row["H_PPG"]) else row["H_PPG"]
-                    A_PPG = 0 if pd.isna(row["A_PPG"]) else row["A_PPG"]
-                    H_SHG = 0 if pd.isna(row["H_SHG"]) else row["H_SHG"]
-                    A_SHG = 0 if pd.isna(row["A_SHG"]) else row["A_SHG"]
-                    adv_h["ppg_fast"] = lambda_fast * adv_h["ppg_fast"] + (
-                        1 - lambda_fast
-                    ) * H_PPG
-                    adv_a["ppg_fast"] = lambda_fast * adv_a["ppg_fast"] + (
-                        1 - lambda_fast
-                    ) * A_PPG
-                    adv_h["shg_fast"] = lambda_fast * adv_h["shg_fast"] + (
-                        1 - lambda_fast
-                    ) * H_SHG
-                    adv_a["shg_fast"] = lambda_fast * adv_a["shg_fast"] + (
-                        1 - lambda_fast
-                    ) * A_SHG
+                        # SV%
+                        H_SV = row.get("H_SV", 0); A_SV = row.get("A_SV", 0)
+                        sa_h = a_sog + as_; sa_a = h_sog + hs
+                        sv_h = H_SV/sa_h if sa_h > 0 else adv_h["svpct_fast"]
+                        sv_a = A_SV/sa_a if sa_a > 0 else adv_a["svpct_fast"]
+                        adv_h["svpct_fast"] = update_ema(adv_h["svpct_fast"], sv_h, lambda_fast)
+                        adv_a["svpct_fast"] = update_ema(adv_a["svpct_fast"], sv_a, lambda_fast)
 
-                    # Save percentage calculation (VERY CRUDE! shots against ROUGHLY EQUALS opp SOG + goals conceded)
-                    # IDK IF THIS IS CORRECT
-                    H_SV = 0 if pd.isna(row["H_SV"]) else row["H_SV"]
-                    A_SV = 0 if pd.isna(row["A_SV"]) else row["A_SV"]
-                    sa_h = A_SOG + ars
-                    sa_a = H_SOG + hs
-                    svpct_h_game = H_SV / sa_h if sa_h > 0 else adv_h["svpct_fast"]
-                    svpct_a_game = A_SV / sa_a if sa_a > 0 else adv_a["svpct_fast"]
-                    adv_h["svpct_fast"] = lambda_fast * adv_h["svpct_fast"] + (
-                        1 - lambda_fast
-                    ) * svpct_h_game
-                    adv_a["svpct_fast"] = lambda_fast * adv_a["svpct_fast"] + (
-                        1 - lambda_fast
-                    ) * svpct_a_game
+                        # Hits/Blk
+                        H_HIT = row.get("H_HIT", 0); A_HIT = row.get("A_HIT", 0)
+                        H_BLK = row.get("H_BLK", 0); A_BLK = row.get("A_BLK", 0)
+                        adv_h["hits_diff_fast"] = update_ema(adv_h["hits_diff_fast"], H_HIT-A_HIT, lambda_fast)
+                        adv_a["hits_diff_fast"] = update_ema(adv_a["hits_diff_fast"], A_HIT-H_HIT, lambda_fast)
+                        adv_h["blocks_diff_fast"] = update_ema(adv_h["blocks_diff_fast"], H_BLK-A_BLK, lambda_fast)
+                        adv_a["blocks_diff_fast"] = update_ema(adv_a["blocks_diff_fast"], A_BLK-H_BLK, lambda_fast)
 
-                    # Hits and blocks (Physicallity)
-                    H_HIT = 0 if pd.isna(row["H_HIT"]) else row["H_HIT"]
-                    A_HIT = 0 if pd.isna(row["A_HIT"]) else row["A_HIT"]
-                    H_BLK = 0 if pd.isna(row["H_BLK"]) else row["H_BLK"]
-                    A_BLK = 0 if pd.isna(row["A_BLK"]) else row["A_BLK"]
-                    adv_h["hits_diff_fast"] = lambda_fast * adv_h[
-                        "hits_diff_fast"
-                    ] + (1 - lambda_fast) * (H_HIT - A_HIT)
-                    adv_a["hits_diff_fast"] = lambda_fast * adv_a[
-                        "hits_diff_fast"
-                    ] + (1 - lambda_fast) * (A_HIT - H_HIT)
-                    adv_h["blocks_diff_fast"] = lambda_fast * adv_h[
-                        "blocks_diff_fast"
-                    ] + (1 - lambda_fast) * (H_BLK - A_BLK)
-                    adv_a["blocks_diff_fast"] = lambda_fast * adv_a[
-                        "blocks_diff_fast"
-                    ] + (1 - lambda_fast) * (A_BLK - H_BLK)
+                        # FO
+                        H_FO = row.get("H_FO", 0); A_FO = row.get("A_FO", 0)
+                        tot_fo = H_FO + A_FO if (H_FO+A_FO)>0 else 1
+                        adv_h["fo_share_fast"] = update_ema(adv_h["fo_share_fast"], H_FO/tot_fo, lambda_fast)
+                        adv_a["fo_share_fast"] = update_ema(adv_a["fo_share_fast"], A_FO/tot_fo, lambda_fast)
 
-                    # Faceoff stats now
-                    H_FO = 0 if pd.isna(row["H_FO"]) else row["H_FO"]
-                    A_FO = 0 if pd.isna(row["A_FO"]) else row["A_FO"]
-                    total_fo = H_FO + A_FO if H_FO + A_FO > 0 else 1.0
-                    fo_share_h = H_FO / total_fo
-                    fo_share_a = A_FO / total_fo
-                    adv_h["fo_share_fast"] = lambda_fast * adv_h["fo_share_fast"] + (
-                        1 - lambda_fast
-                    ) * fo_share_h
-                    adv_a["fo_share_fast"] = lambda_fast * adv_a["fo_share_fast"] + (
-                        1 - lambda_fast
-                    ) * fo_share_a
+                        adv_h["adv_games"] += 1; adv_a["adv_games"] += 1
 
-                    adv_h["adv_games"] += 1
-                    adv_a["adv_games"] += 1
-
-                # Head-to-head updates
-                key_ha = (h, a)
-                if key_ha not in h2h:
-                    h2h[key_ha] = {"win_ema": 0.5, "goal_diff_ema": 0.0, "count": 0}
-                entry = h2h[key_ha]
-                entry["win_ema"] = lambda_h2h * entry["win_ema"] + (
-                        1 - lambda_h2h) * S_h
-                entry["goal_diff_ema"] = lambda_h2h * entry["goal_diff_ema"] + (
-                        1 - lambda_h2h) * goal_diff
-                entry["count"] += 1
+                    # H2H Update
+                    if key_ha not in h2h: h2h[key_ha] = {"win_ema": 0.5, "goal_diff_ema": 0.0, "count": 0}
+                    h2h[key_ha]["win_ema"] = update_ema(h2h[key_ha]["win_ema"], S_h, lambda_h2h)
+                    h2h[key_ha]["goal_diff_ema"] = update_ema(h2h[key_ha]["goal_diff_ema"], goal_diff, lambda_h2h)
+                    h2h[key_ha]["count"] += 1
 
             feat_df = pd.DataFrame(feature_rows)
             feat_df = feat_df.set_index("orig_index").sort_index()
             return feat_df 
-        
+
         def clear_oops (oops: pd.DataFrame) -> pd.DataFrame:
             df = oops.copy()
             df.drop(columns=["BetH", "BetA", "BetD"], inplace=True)
