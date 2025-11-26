@@ -4,6 +4,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 import numpy as np
 import pandas as pd
@@ -12,6 +13,7 @@ from scipy import stats
 from sklearn import metrics, datasets
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
+from scipy.optimize import minimize
 
 class Model:
 
@@ -578,8 +580,8 @@ def build_features(
             df.fillna(0, inplace=True)
             return df
 
-        def nn_train(builded_ft: pd.DataFrame):                 
-            df = builded_ft
+        def nn_train_and_predict(builded_ft_with_oops: pd.DataFrame):                 
+            df = builded_ft_with_oops
             df = df[df["y_draw"] == 0]
 
              
@@ -594,30 +596,46 @@ def build_features(
             df = df.replace(np.nan,0)
             df["Bookmaker_prob"] = (1/df["oddsH"])/(1/df["oddsH"]  + 1/df["oddsA"])
             
+            df_oops = df[df["is_oop"]==True]
+            data_predict = df_oops.drop(columns=["Bookmaker_prob", "y_home_win"]).values
+            X_predict = data_predict.tolist()
+            bookmaker_prob_predict = df_oops["Bookmaker_prob"].values
+            bookmaker_prob_predict = bookmaker_prob_predict.tolist()
+
+            df = df[df["is_oop"]==False]
+
             data = df.drop(columns=[ "y_home_win", "Bookmaker_prob"]).values
             target = df["y_home_win"].values
             bookmaker_prob = df["Bookmaker_prob"].values
 
             scaler = StandardScaler()
 
-            Xtrain = data.values.tolist()
-            ytrain_data = target.values.tolist()
-            bookmaker_prob_train = bookmaker_prob.values.tolist()
+            Xtrain = data.tolist()
+            ytrain_data = target.tolist()
+            bookmaker_prob_train = bookmaker_prob.tolist()
             ##
             Xtrain_data = scaler.fit_transform(Xtrain)
+            ##
+            X_predict = scaler.transform(X_predict)
 
              
             X_train = torch.tensor(Xtrain_data, dtype=torch.float32)
             bookmaker_prob_train = torch.tensor(bookmaker_prob_train, dtype=torch.float32).unsqueeze(1)
             y_train = torch.tensor(ytrain_data, dtype=torch.float32).unsqueeze(1)
 
-
+            X_predict = torch.tensor(X_predict, dtype=torch.float32)
+            bookmaker_prob_predict = torch.tensor(bookmaker_prob_predict, dtype=torch.float32).unsqueeze(1)
 
             train_dataset = TensorDataset(X_train, bookmaker_prob_train, y_train)
             train_loader = DataLoader(train_dataset, batch_size=64, shuffle=False) 
 
+
+            pred_dataset = TensorDataset(X_predict, bookmaker_prob_predict)
+            pred_loader = DataLoader(pred_dataset, batch_size=64, shuffle=False)
+
+
              
-            import torch.nn.functional as F
+            
 
             class ProbabilityEstimatorNN(nn.Module):
                 def __init__(self, input_dim, hidden_dim=64):
@@ -642,7 +660,7 @@ def build_features(
                     x = self.output(x)  # Outputs probabilities in [0,1]
                     return x
 
-            import torch
+            
 
             def decorrelation_loss(outputs, bookmaker_prob, lambda_decorr):
                 outputs = outputs.view(-1)
@@ -650,12 +668,6 @@ def build_features(
                 cov = torch.mean((outputs - outputs.mean()) * (bookmaker_prob - bookmaker_prob.mean()))
                 loss = lambda_decorr * cov**2
                 return loss
-
-            """def decorrelation_loss(outputs, bookmaker_prob, lambda_decorr):
-                outputs = outputs.view(-1)
-                bookmaker_prob = bookmaker_prob.view(-1)
-                loss = lambda_decorr * torch.sum((outputs - bookmaker_prob).pow(2)) / outputs.size(0)
-                return loss"""
 
             def l2_regularization(model, lambda_):
                 # Sum of squared weights (L2 norm), excluding biases
@@ -665,12 +677,6 @@ def build_features(
                     if param.requires_grad and param.dim() > 1
                 )
                 return lambda_ * l2_norm
-            # in training loop:
-            # outputs = model(X_batch)
-            # loss = criterion(outputs, y_batch)
-            # reg = l2_regularization(model, lambda_)
-            # total_loss = loss + reg
-            # total_loss.backward()
 
 
 
@@ -678,28 +684,13 @@ def build_features(
             # Suppose X_train, y_train, bookmaker_probs_train are your training data tensors
             # X_train: (num_samples, feature_dim), y_train: (num_samples, 1), bookmaker_probs_train: (num_samples,)
             # Wrap in Dataset and DataLoader
-            feature_dim = data.shape[1]
-            model = ProbabilityEstimatorNN(feature_dim)
-            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-
-
-            criterion = nn.BCEWithLogitsLoss()
-
-            num_samples_train = X_train.shape[0]
 
 
             # Initialize model, optimizer
 
 
-            # Hyperparameters for loss
-
-            lambda_ = 0.01
-            lambda_decorr = 0.3
-            epochs = 100
-
-
             # Training loop
-            def train(model, optimizer, criterion, num_samples_train, lambda_decorr, epochs, train_loader, lambda_):
+            def train(model, optimizer, criterion, lambda_decorr, epochs, train_loader, lambda_):
                 
                 for epoch in range(epochs):
                     print(epoch)
@@ -717,69 +708,174 @@ def build_features(
                         optimizer.step()           # Update parameters)
                         total_loss += loss.item() * X_batch.size(0)
                     avg_loss = total_loss / len(train_loader.dataset)
+                
+                return
 
+            
 
-                return avg_loss
-
-             
-            X_val = torch.tensor(Xval_data, dtype=torch.float32)
-            bookmaker_prob_val = torch.tensor(bookmaker_prob_val_data, dtype=torch.float32).unsqueeze(1)
-            y_val = torch.tensor(yval_data, dtype=torch.float32).unsqueeze(1)
-
-            val_dataset = TensorDataset(X_val, bookmaker_prob_val, y_val)
-            val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
-
-             
-            num_samples_val = X_val.shape[0]
-
-            def predict(model, criterion, val_loader):
+            def predict(model, criterion, pred_loader):
                 all_predictions = []
-                num_samples = 0
-                total_loss = 0
                 with torch.no_grad():
-                    for X_batch, y_batch, bookmaker_batch in val_loader:
-                        outputs = model(X_batch)
-                        loss = criterion(outputs, y_batch) #- (1/num_samples_val)*decorrel_weight*decorellation(bookmaker_batch, outputs)
+                    for X_batch, bookmaker_batch in pred_loader:
+                        outputs = model(X_batch) #- (1/num_samples_val)*decorrel_weight*decorellation(bookmaker_batch, outputs)
                         batch_size = X_batch.size(0)
-                        total_loss += loss.item() * batch_size
                         num_samples += batch_size
                         probs = torch.sigmoid(outputs).view(-1).cpu()
                         all_predictions.append(probs)
 
-                avg_loss = total_loss / num_samples
-                #print(f"Validation Loss: {avg_loss:.4f}")
                 flat_array = torch.cat(all_predictions).numpy()
-                mse = mean_squared_error(yval_data, flat_array)
-                r2 = r2_score(yval_data, flat_array)
+                return flat_array
 
-                #print("MSE:", mse)
-                #print("R2:", r2)
-                return avg_loss, flat_array, mse, r2
 
-             
-            def accuracy(flat_array, sensitivity):
-                adjusted = np.full_like(flat_array, 0.5)  # Initialize with 0.5
+            ### model parameters
+            feature_dim = data.shape[1]
+            model = ProbabilityEstimatorNN(feature_dim)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            criterion = nn.BCEWithLogitsLoss()
+            ###
 
-                mask_high = flat_array > (0.5 + sensitivity)
-                mask_low = flat_array < (0.5 - sensitivity)
+            train(model, optimizer, criterion, lambda_decorr=0.3, epochs=4, train_loader=train_loader, lambda_=0.002)
+            predictions = predict(model, criterion, pred_loader)
 
-                adjusted[mask_high] = 1
-                adjusted[mask_low] = 0
+            return predictions
 
-                adjusted = adjusted.reshape(-1)
+        def generate_bets(outcome:pd.DataFrame, sens:float, bookmaker_odds_H:np.array, bookmaker_odds_A:np.array, wealth:float, min_bet:float, max_bet:float):
 
-                acc = (adjusted == yval_data).mean()
+            """
+            Maximize Sharpe ratio given model probabilities and bookmaker odds.
+            """
+        
+        # -----------------------------
+        # 1. CLASSIFICATION
+        # -----------------------------
+            def classify_probabilities(outcome, sens):
+                result = {}
+                for i, p in enumerate(outcome):
+                    if p > 0.5 + sens:
+                        result[i] = ("H", (p,bookmaker_odds_H[i]))
+                    elif p < 0.5 - sens:
+                        result[i] = ("A", (1 - p, bookmaker_odds_A[i]))
+                    else:
+                        result[i] = ("D", 0.0)
+                return result
 
-                print(f"Validation accuracy of normalized model: {acc:.4f}")
-                print(np.unique(yval_data))  
-                print("acc on making a guess:", acc*len(adjusted)/np.sum(adjusted != 0.5))
-                acc_with_making_a_guess = acc*len(adjusted)/np.sum(adjusted != 0.5)
-                volatility = np.sum(adjusted != 0.5)
-                return acc, acc_with_making_a_guess, volatility
+            classified = classify_probabilities(outcome, sens)
 
+            # Extract only usable probabilities (H/A bets)
+
+            # -----------------------------
+            # 2. EXPECTED RETURN & VARIANCE
+            # -----------------------------
+            #exp_ret = np.maximum(probs * bookmaker_odds - 1,0) 
+            indices = list(classified.keys())
+            labels = []
+            p_list = []
+            odds_list = []
+
+            for i, (label, info) in classified.items():
+                labels.append(label)
+                if label == "D":
+                    p_list.append(0.0)
+                    odds_list.append(0.0)
+                else:
+                    p, o = info   # info = (p, odds)
+                    p_list.append(p)
+                    odds_list.append(o)
+            #print(odds_list)
+            probs = np.array(p_list)        # shape (n,)
+            odds  = np.array(odds_list)     # shape (n,)
+            labels = np.array(labels) 
+
+            exp_ret = probs*odds - 1 # μ_i = p_i * o_i - 1
+
+            var_ret = probs * (1 - probs) * (odds ** 2) + 1e-8 
+                # μ_i = p_i * o_i - 1        
+                # σ_i² = p(1-p)o²
+        
+            # -----------------------------
+            # 3. INITIAL GUESS
+            # -----------------------------
+            
+            
+            b0 = []
+            for p in probs:
+                if p > 0:
+                    b0.append(min_bet)
+                else:
+                    b0.append(0.0)
+            b0 = np.array(b0)
+
+            # -----------------------------
+            # 4. BOUNDS: zero-prob → force no bet
+            # -----------------------------
+            bounds = []
+            for p in probs:
+                if p == 0:
+                    bounds.append((0, 0))
+                else:
+                    # We must cap the max_bet at the total wealth to avoid logical errors,
+                    # though the sum constraint handles the total budget.
+                    upper_limit = min(max_bet, wealth)
+                    bounds.append((min_bet, upper_limit))      # normal range
+
+            # -----------------------------
+            # 5. Constraint: sum(bets) ≤ wealth
+            # -----------------------------
+            constraints = [
+                {'type': 'ineq', 'fun': lambda b: wealth - np.sum(b)}
+            ]
+
+            # -----------------------------
+            # 6. Sharpe ratio (negative for minimizer)
+            # -----------------------------
+            def sharpe_negative(b, exp_ret, var_ret):
+                expected_return = b @ exp_ret
+                variance = np.sum((b ** 2) * var_ret)
+
+                #print("expected_return:", expected_return, "shape:", np.shape(expected_return))
+                #print("variance:", variance, "shape:", np.shape(variance))
+
+                if np.isscalar(expected_return) == False or np.isscalar(variance) == False:
+                    raise ValueError("Expected return and variance must be scalars.")
+
+                if variance <= 0:
+                    return np.inf
+
+                return -(expected_return / np.sqrt(variance))
+            # -----------------------------
+            # 7. Optimization
+            # -----------------------------
+            result = minimize(
+                fun=sharpe_negative,
+                x0=b0,
+                args=(exp_ret, var_ret),
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints
+            )
+
+            optimal_bets = result.x
+
+            # -----------------------------
+            # 8. Attach to dictionary
+            # -----------------------------
+            merged = {}
+            for k, i in enumerate(indices):
+                label, info = classified[i]
+                merged[i] = {
+                    "label": label,
+                    "prob": info,
+                    "bet": float(optimal_bets[k])
+                }
+
+            return merged
 
         min_bet = summary.iloc[0]["Min_bet"]
-        N = len(opps)
+        max_bet = summary.iloc[0]["Max_bet"]
+        number_of_oops = len(opps)
+
+        clear = clear_data(inc):
+        
 
         bets = np.zeros((N, 3))
         bets[np.arange(N), np.random.choice([0, 1, 2])] = min_bet
