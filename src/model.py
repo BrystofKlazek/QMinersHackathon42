@@ -16,6 +16,12 @@ from sklearn.model_selection import train_test_split
 from scipy.optimize import minimize
 
 class Model:
+    def __init__(self):
+        # Tady se ukládají data do "self"     
+        self.sensitivity = 0.19
+        self.epochs = 4
+        self.decorrelation_lambda = 0.3
+        self.lambda_ =0.002
 
     def place_bets(
         self,
@@ -23,7 +29,7 @@ class Model:
         opps: pd.DataFrame,
         inc: pd.DataFrame,
     ):
-        def clear_data(inc: pd.DataFrame) -> pd.DataFrame:
+        def clear_data( inc: pd.DataFrame) -> pd.DataFrame:
 
             
             """pd.reset_option('display.max_rows')
@@ -33,17 +39,13 @@ class Model:
             df = inc.copy()
             #df.head()
 
-
         
 
             df[["OddsH", "OddsA"]] = df[["OddsH", "OddsA"]].replace(0, np.nan)
 
-
-             
+           
             df = df.dropna(subset=['OddsH'])
-
-             
-            df = df.drop("Unnamed: 0", axis = 1)
+            
 
              
             #df.head() #dropping null values for odds because we need them for our model
@@ -107,7 +109,7 @@ class Model:
 
             df["H_SOG"] = df["H_SOG"].fillna(median_H_SOG)
             df["A_SOG"] = df["A_SOG"].fillna(median_A_SOG)
-            df["H_BLK_S"] = df["H_BLK_S"].fillna(median_A_BLK_S)
+            df["H_BLK_S"] = df["H_BLK_S"].fillna(median_H_BLK_S)
             df["A_BLK_S"] = df["A_BLK_S"].fillna(median_A_BLK_S)
             df["H_HIT"] = df["H_HIT"].fillna(median_H_HIT)
             df["A_HIT"] = df["A_HIT"].fillna(median_A_HIT)
@@ -138,7 +140,6 @@ class Model:
              
             #df.loc[df["H_P3"].isna()]
 
-             
             #tohle musím dopnit ručně, aby to sedělo s počtem golu a special eventem, udělám to asi uniformě
             df = df.dropna(subset=['H_P3', 'A_P3'])
             df = df.dropna(subset=['H_P2', 'A_P2'])
@@ -170,7 +171,6 @@ class Model:
 
              
             #drop Open column
-            df = df.drop("Open", axis=1)
             df.fillna(0, inplace=True)
             #df.head()
 
@@ -235,7 +235,7 @@ class Model:
              
             return df
 
-def build_features(
+        def build_features(
             games_all: pd.DataFrame,
             elo_K: float = 20.0,
             elo_alpha: float = 0.99,
@@ -573,181 +573,179 @@ def build_features(
             feat_df = feat_df.set_index("orig_index").sort_index()
             return feat_df 
 
-        def clear_oops (oops: pd.DataFrame) -> pd.DataFrame:
+        def clear_oops ( oops: pd.DataFrame) -> pd.DataFrame:
             df = oops.copy()
             df.drop(columns=["BetH", "BetA", "BetD"], inplace=True)
             df = df.replace([np.inf, -np.inf], np.nan)
             df.fillna(0, inplace=True)
             return df
-
-        def nn_train_and_predict(builded_ft_with_oops: pd.DataFrame):                 
-            df = builded_ft_with_oops
-            df = df[df["y_draw"] == 0]
-
-             
-            df.drop(columns = ["Season", "Date", "y_draw", "elo_p_h", "market_type", "y_away_win"], inplace=True)
-
-             
-            """bookmaker_odds_H = df["oddsH"].values  # numpy array
-            bookmaker_odds_A = df["oddsA"].values""" 
-
-
-             
-            df = df.replace(np.nan,0)
-            df["Bookmaker_prob"] = (1/df["oddsH"])/(1/df["oddsH"]  + 1/df["oddsA"])
+        #nn return dates and probs for them, because I needed to get rid of draw opp
+        def nn_train_and_predict( builded_ft_with_oops: pd.DataFrame) -> dict: 
+            df = builded_ft_with_oops.copy()
+            # --- DEBUG START ---
+            print("\n--- DEBUGGING DATA SHAPE ---")
+            print(f"1. Total Rows: {len(df)}")
+            print(f"2. Rows with is_opp=False (History): {len(df[df['is_opp'] == False])}")
+            print(f"3. Rows with is_opp=True (Future): {len(df[df['is_opp'] == True])}")
             
-            df_oops = df[df["is_oop"]==True]
-            data_predict = df_oops.drop(columns=["Bookmaker_prob", "y_home_win"]).values
-            X_predict = data_predict.tolist()
-            bookmaker_prob_predict = df_oops["Bookmaker_prob"].values
-            bookmaker_prob_predict = bookmaker_prob_predict.tolist()
+            if "y_draw" in df.columns:
+                print(f"4. Unique values in 'y_draw': {df['y_draw'].unique()}")
+                print(f"5. Rows after y_draw==0 filter: {len(df[(df['is_opp'] == False) & (df['y_draw'] == 0)])}")
+            else:
+                print("4. ERROR: 'y_draw' column is missing!")
+            print("----------------------------\n")
+            # --- DEBUG END ---
+                                         
+            # Copy to avoid modifying original
+            
+            
+            # --- FIX: Split History vs Opportunities FIRST ---
+            # 1. Extract Opportunities (Future Games)
+            # We don't filter these by 'y_draw' because they don't have results yet!
+            df_oops = df[df["is_opp"] == True].copy()
+            
+            # 2. Extract History (Past Games)
+            df_hist = df[df["is_opp"] == False].copy()
 
-            df = df[df["is_oop"]==False]
+            # --- Now Clean the History Data ---
+            # 3. Filter Draws only from History
+            if "y_draw" in df_hist.columns:
+                df_hist = df_hist[df_hist["y_draw"] == 0]
+            #PROJET PORADNE JESTLI != DF NEDELA BORDEL
+            # 4. Calculate Bookmaker Probabilities for both
+            # (Handle NaNs carefully)
+            for d in [df_oops, df_hist]:
+                d.replace(np.nan, 0, inplace=True)
+                # Avoid division by zero
+                mask = (d["oddsH"] != 0) & (d["oddsA"] != 0)
+                d.loc[mask, "Bookmaker_prob"] = (1/d.loc[mask, "oddsH"]) / (1/d.loc[mask, "oddsH"] + 1/d.loc[mask, "oddsA"])
+                d["Bookmaker_prob"] = d["Bookmaker_prob"].fillna(0)
 
-            data = df.drop(columns=[ "y_home_win", "Bookmaker_prob"]).values
-            target = df["y_home_win"].values
-            bookmaker_prob = df["Bookmaker_prob"].values
+            # 5. Clean up Prediction Data (df_oops)
+            # Filter rows with valid odds if needed (e.g. oddsD != 0 check)
+            if "OddsD" in df_oops.columns:
+                 df_oops = df_oops[df_oops["OddsD"] == 0]
 
+            # Safe Date Extraction
+            if not df_oops.empty:
+                date_key = tuple(df_oops["Date"].tolist())
+            else:
+                date_key = ("No_Games",)
+
+            # Drop non-feature columns
+            drop_cols_predict = ["Season", "Date", "y_draw", "elo_p_h", "market_type", "y_away_win", "is_opp", "is_oop"]
+            df_oops.drop(columns=drop_cols_predict, inplace=True, errors='ignore')
+            
+            # Separate Features vs Meta
+            X_predict = df_oops.drop(columns=["Bookmaker_prob", "y_home_win"], errors='ignore').values
+            bookmaker_prob_predict = df_oops["Bookmaker_prob"].values.tolist()
+
+            # 6. Clean up Training Data (df_hist)
+            drop_cols_train = ["Season", "Date", "y_draw", "elo_p_h", "market_type", "y_away_win", "is_opp", "is_oop"]
+            df_hist.drop(columns=drop_cols_train, inplace=True, errors='ignore')
+
+            Xtrain_data = df_hist.drop(columns=["y_home_win", "Bookmaker_prob"], errors='ignore').values
+            ytrain_data = df_hist["y_home_win"].values
+            bookmaker_prob_train = df_hist["Bookmaker_prob"].values
+
+            # --- CRITICAL SAFETY CHECK ---
+            if len(Xtrain_data) == 0:
+                raise ValueError("Error: Training Set is empty. Check if 'y_draw' filtering removed all rows.")
+            if len(X_predict) == 0:
+                # If we have no games to predict, return empty result gracefully
+                print("Warning: No opportunities found to predict.")
+                return {date_key: np.array([])}
+
+            # 7. Scaling
             scaler = StandardScaler()
+            Xtrain_scaled = scaler.fit_transform(Xtrain_data)
+            X_predict_scaled = scaler.transform(X_predict)
 
-            Xtrain = data.tolist()
-            ytrain_data = target.tolist()
-            bookmaker_prob_train = bookmaker_prob.tolist()
-            ##
-            Xtrain_data = scaler.fit_transform(Xtrain)
-            ##
-            X_predict = scaler.transform(X_predict)
-
-             
-            X_train = torch.tensor(Xtrain_data, dtype=torch.float32)
+            # 8. Tensor Conversion
+            X_train = torch.tensor(Xtrain_scaled, dtype=torch.float32)
             bookmaker_prob_train = torch.tensor(bookmaker_prob_train, dtype=torch.float32).unsqueeze(1)
             y_train = torch.tensor(ytrain_data, dtype=torch.float32).unsqueeze(1)
 
-            X_predict = torch.tensor(X_predict, dtype=torch.float32)
+            X_predict = torch.tensor(X_predict_scaled, dtype=torch.float32)
             bookmaker_prob_predict = torch.tensor(bookmaker_prob_predict, dtype=torch.float32).unsqueeze(1)
 
+            # 9. DataLoaders
             train_dataset = TensorDataset(X_train, bookmaker_prob_train, y_train)
-            train_loader = DataLoader(train_dataset, batch_size=64, shuffle=False) 
-
+            train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True) 
 
             pred_dataset = TensorDataset(X_predict, bookmaker_prob_predict)
             pred_loader = DataLoader(pred_dataset, batch_size=64, shuffle=False)
 
-
-             
-            
-
+            # --- Define Model (Inner Class) ---
             class ProbabilityEstimatorNN(nn.Module):
                 def __init__(self, input_dim, hidden_dim=64):
                     super().__init__()
                     self.fc1 = nn.Linear(input_dim, hidden_dim)
                     self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-                    self.output = nn.Linear(hidden_dim, 1)  # Single output neuron
-
-                # Xavier/Glorot initialization for hidden layers
+                    self.output = nn.Linear(hidden_dim, 1)
                     nn.init.xavier_uniform_(self.fc1.weight)
                     nn.init.xavier_uniform_(self.fc2.weight)
                     nn.init.zeros_(self.fc1.bias)
                     nn.init.zeros_(self.fc2.bias)
-                    
-                    # Small random init for output layer
                     nn.init.uniform_(self.output.weight, -0.1, 0.1)
                     nn.init.zeros_(self.output.bias)
 
                 def forward(self, x):
                     x = F.relu(self.fc1(x))
                     x = F.relu(self.fc2(x))
-                    x = self.output(x)  # Outputs probabilities in [0,1]
+                    x = self.output(x)
                     return x
 
-            
-
+            # Training Helpers
             def decorrelation_loss(outputs, bookmaker_prob, lambda_decorr):
                 outputs = outputs.view(-1)
                 bookmaker_prob = bookmaker_prob.view(-1)
                 cov = torch.mean((outputs - outputs.mean()) * (bookmaker_prob - bookmaker_prob.mean()))
-                loss = lambda_decorr * cov**2
-                return loss
+                return lambda_decorr * cov**2
 
             def l2_regularization(model, lambda_):
-                # Sum of squared weights (L2 norm), excluding biases
-                l2_norm = sum(
-                    torch.sum(param ** 2) 
-                    for param in model.parameters() 
-                    if param.requires_grad and param.dim() > 1
-                )
+                l2_norm = sum(torch.sum(p ** 2) for p in model.parameters() if p.requires_grad and p.dim() > 1)
                 return lambda_ * l2_norm
 
-
-
-             
-            # Suppose X_train, y_train, bookmaker_probs_train are your training data tensors
-            # X_train: (num_samples, feature_dim), y_train: (num_samples, 1), bookmaker_probs_train: (num_samples,)
-            # Wrap in Dataset and DataLoader
-
-
-            # Initialize model, optimizer
-
-
-            # Training loop
-            def train(model, optimizer, criterion, lambda_decorr, epochs, train_loader, lambda_):
-                
-                for epoch in range(epochs):
-                    print(epoch)
-                    total_loss = 0
-                    for X_batch, bookmaker_batch, y_batch in train_loader:
+            def train(model, optimizer, criterion, lambda_decorr, epochs, loader, lambda_reg):
+                model.train()
+                for _ in range(epochs):
+                    for X_b, bm_b, y_b in loader:
                         optimizer.zero_grad()
-                        outputs = model(X_batch) 
-                        #print("outputs min/max:", outputs.min().item(), outputs.max().item()) #debugging
-                        loss = criterion(outputs, y_batch) + decorrelation_loss(bookmaker_batch, outputs,lambda_decorr) + l2_regularization(model, lambda_)
-                        loss.backward() 
-                        """for name, param in model.named_parameters():
-                            if param.grad is not None:
-                                print(name, param.grad.norm().item())"""          
-                        # Backpropagation
-                        optimizer.step()           # Update parameters)
-                        total_loss += loss.item() * X_batch.size(0)
-                    avg_loss = total_loss / len(train_loader.dataset)
-                
-                return
+                        out = model(X_b)
+                        loss = criterion(out, y_b) + decorrelation_loss(bm_b, out, lambda_decorr) + l2_regularization(model, lambda_reg)
+                        loss.backward()
+                        optimizer.step()
 
-            
-
-            def predict(model, criterion, pred_loader):
-                all_predictions = []
+            def predict(model, loader):
+                model.eval()
+                preds = []
                 with torch.no_grad():
-                    for X_batch, bookmaker_batch in pred_loader:
-                        outputs = model(X_batch) #- (1/num_samples_val)*decorrel_weight*decorellation(bookmaker_batch, outputs)
-                        batch_size = X_batch.size(0)
-                        num_samples += batch_size
-                        probs = torch.sigmoid(outputs).view(-1).cpu()
-                        all_predictions.append(probs)
+                    for X_b, _ in loader:
+                        out = model(X_b)
+                        preds.append(torch.sigmoid(out).view(-1).cpu())
+                return torch.cat(preds).numpy() if preds else np.array([])
 
-                flat_array = torch.cat(all_predictions).numpy()
-                return flat_array
-
-
-            ### model parameters
-            feature_dim = data.shape[1]
+            # --- Execution ---
+            feature_dim = Xtrain_data.shape[1]
             model = ProbabilityEstimatorNN(feature_dim)
             optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
             criterion = nn.BCEWithLogitsLoss()
-            ###
-
-            train(model, optimizer, criterion, lambda_decorr=0.3, epochs=4, train_loader=train_loader, lambda_=0.002)
-            predictions = predict(model, criterion, pred_loader)
-
-            return predictions
-
-        def generate_bets(outcome:pd.DataFrame, sens:float, bookmaker_odds_H:np.array, bookmaker_odds_A:np.array, wealth:float, min_bet:float, max_bet:float):
+            
+            train(model, optimizer, criterion, self.decorrelation_lambda, self.epochs, train_loader, self.lambda_)
+            predictions = predict(model, pred_loader)
+            
+            return {date_key: predictions}
+        
+        def generate_bets( outcome:pd.DataFrame, sens:float, bookmaker_odds_H:np.array, bookmaker_odds_A:np.array, wealth:float) -> dict:
 
             """
             Maximize Sharpe ratio given model probabilities and bookmaker odds.
             """
-        
-        # -----------------------------
-        # 1. CLASSIFICATION
-        # -----------------------------
+            
+            # -----------------------------
+            # 1. CLASSIFICATION
+            # -----------------------------
             def classify_probabilities(outcome, sens):
                 result = {}
                 for i, p in enumerate(outcome):
@@ -796,14 +794,8 @@ def build_features(
             # 3. INITIAL GUESS
             # -----------------------------
             
+            b0 = np.clip(probs, 1e-3, wealth)  # start with 0 bets
             
-            b0 = []
-            for p in probs:
-                if p > 0:
-                    b0.append(min_bet)
-                else:
-                    b0.append(0.0)
-            b0 = np.array(b0)
 
             # -----------------------------
             # 4. BOUNDS: zero-prob → force no bet
@@ -811,12 +803,9 @@ def build_features(
             bounds = []
             for p in probs:
                 if p == 0:
-                    bounds.append((0, 0))
+                    bounds.append((0, 0))           # lock bet = 0
                 else:
-                    # We must cap the max_bet at the total wealth to avoid logical errors,
-                    # though the sum constraint handles the total budget.
-                    upper_limit = min(max_bet, wealth)
-                    bounds.append((min_bet, upper_limit))      # normal range
+                    bounds.append((0, wealth))      # normal range
 
             # -----------------------------
             # 5. Constraint: sum(bets) ≤ wealth
@@ -870,16 +859,87 @@ def build_features(
 
             return merged
 
-        min_bet = summary.iloc[0]["Min_bet"]
-        max_bet = summary.iloc[0]["Max_bet"]
-        number_of_oops = len(opps)
-
-        clear = clear_data(inc):
+        # --- MAIN FUNCTION LOGIC ---
+        
+        wealth = summary.iloc[0]["Bankroll"]
+        #print(f"\n1.fd Total Rows: {len(inc)}\n ")
         
 
-        bets = np.zeros((N, 3))
-        bets[np.arange(N), np.random.choice([0, 1, 2])] = min_bet
-        bets = pd.DataFrame(
-            data=bets, columns=["BetH", "BetA", "BetD"], index=opps.index
+        clear = clear_data(inc)
+        oops_ext = clear_oops(opps)
+        id = oops_ext.index
+        ids = id.values   
+        Bets = pd.DataFrame({
+            'ID': ids,
+            'BetH': 0.0,
+            'BetA': 0.0,
+            'BetD': 0.0
+        })
+
+        #is there opp for my model?
+        opps_ND = opps[opps["OddsD"]==0]
+        print(f"-- opps {len(opps_ND)} ---")
+        train = clear[clear["OddsD"]==0]
+        print(f"-- clear {len(train)} ---")
+
+        if len(opps_ND) == 0:
+            print(f"No opp for my model")
+            return Bets
+        elif len(train) == 0:
+            print(f"No valid training")
+            return Bets
+
+        clear["is_opp"] = False
+        oops_ext["is_opp"] = True
+        
+
+        #creates min and max bet arrays for each day in opps
+        min_bet = summary.iloc[0]["Min_bet"]
+        max_bet = summary.iloc[0]["Max_bet"]
+
+
+        games_all = pd.concat([clear, oops_ext], axis=0, sort=False)
+
+        feat_all = build_features(games_all)
+
+        predictions = nn_train_and_predict(feat_all)
+
+        # --- NEW CODE (USE THIS) ---
+        # 1. Extract the arrays from the dictionary values
+        arrays = list(predictions.values())
+
+        # 2. Concatenate them into a single numpy array (handles single or multiple dates)
+        probs = np.concatenate(arrays)
+        # 3. Flatten ensure it is 1D: [0.5, 0.6, ...] instead of [[0.5], [0.6]...]
+        probs = probs.flatten()   
+
+        date_list = list(predictions.keys())
+
+        oopsNotD = oops_ext
+        bookmaker_odds_H = oopsNotD["OddsH"].values
+        bookmaker_odds_A = oopsNotD["OddsA"].values
+
+        bets = generate_bets(
+            outcome=probs,
+            sens=self.sensitivity,
+            bookmaker_odds_H=bookmaker_odds_H,
+            bookmaker_odds_A=bookmaker_odds_A,
+            wealth=wealth
         )
-        return bets
+
+        #creating apropriate bets for all dates in opps
+
+
+        
+
+
+        if summary["Date"].iloc[0] == date_list[0]:
+            if bets[0]["bet"] > min_bet:
+                if bets[0]["label"] == "H":
+                    Bets.at[0, "BetH"] = min(max_bet, bets[0]["bet"])
+                elif bets[0]["label"] == "A":
+                    Bets.at[0, "BetA"] = min(max_bet, bets[0]["bet"])
+        
+        return Bets
+
+
